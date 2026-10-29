@@ -1,0 +1,154 @@
+{
+  "enabled": {
+    "description": "启用睡觉插件",
+    "type": "bool",
+    "default": true
+  },
+  "random_schedule": {
+    "description": "随机作息模式（每日抽签入睡时刻+时长推导起床）",
+    "hint": "关闭则退回固定作息（用下面两项）；数值类配置超出范围自动回落默认并记日志",
+    "type": "bool",
+    "default": true
+  },
+  "bedtime_base": {
+    "description": "基准入睡点（HH:MM，围绕它近正态波动）",
+    "type": "string",
+    "default": "23:00"
+  },
+  "bedtime_earliest": {
+    "description": "最早入睡（HH:MM，硬边界）",
+    "type": "string",
+    "default": "22:15"
+  },
+  "bedtime_latest": {
+    "description": "最晚入睡（HH:MM，硬边界；跨午夜如 01:10）",
+    "type": "string",
+    "default": "01:10"
+  },
+  "insomnia_chance": {
+    "description": "失眠夜概率（%）",
+    "hint": "命中则入睡拖到最晚入睡~失眠上限之间，且次日必赖床",
+    "type": "float",
+    "default": 10
+  },
+  "insomnia_latest": {
+    "description": "失眠夜最晚（HH:MM）",
+    "type": "string",
+    "default": "02:30"
+  },
+  "sleep_hours_base": {
+    "description": "基准睡眠时长（小时）",
+    "type": "float",
+    "default": 7.5
+  },
+  "sleep_hours_sigma": {
+    "description": "睡眠时长波动（小时，近正态±）",
+    "type": "float",
+    "default": 1.0
+  },
+  "weekend_extra_min": {
+    "description": "周末睡眠加成下限（分钟，按起床日判周末）",
+    "type": "float",
+    "default": 30
+  },
+  "weekend_extra_max": {
+    "description": "周末睡眠加成上限（分钟）",
+    "type": "float",
+    "default": 90
+  },
+  "wake_earliest": {
+    "description": "最早起床（HH:MM，睡饱自然醒下限）",
+    "type": "string",
+    "default": "06:40"
+  },
+  "wake_hardcap": {
+    "description": "最晚起床硬顶（HH:MM，再赖也得起）",
+    "type": "string",
+    "default": "09:30"
+  },
+  "oversleep_threshold": {
+    "description": "赖床判定阈值（HH:MM，入睡晚于它才开始高概率赖床）",
+    "type": "string",
+    "default": "00:30"
+  },
+  "oversleep_base": {
+    "description": "赖床基础概率（%）",
+    "type": "float",
+    "default": 50
+  },
+  "oversleep_per_30": {
+    "description": "阈值后每再晚30分钟赖床概率加成（%，封顶100）",
+    "type": "float",
+    "default": 15
+  },
+  "oversleep_bonus_min": {
+    "description": "赖床加成下限（分钟）",
+    "type": "float",
+    "default": 10
+  },
+  "oversleep_bonus_max": {
+    "description": "赖床加成上限（分钟）",
+    "type": "float",
+    "default": 40
+  },
+  "earlybed_oversleep_chance": {
+    "description": "早睡偶发赖床概率（%）",
+    "type": "float",
+    "default": 10
+  },
+  "debt_ratio": {
+    "description": "睡眠债折算（%，被叫醒N分钟→起床顺延N×比例；第4步生效）",
+    "type": "float",
+    "default": 50
+  },
+  "fixed_bedtime": {
+    "description": "固定模式入睡时刻（HH:MM，仅随机模式关闭时用）",
+    "type": "string",
+    "default": "23:00"
+  },
+  "fixed_waketime": {
+    "description": "固定模式起床时刻（HH:MM）",
+    "type": "string",
+    "default": "07:00"
+  },
+  "buffer_max_per_session": {
+    "description": "单会话夜间缓冲上限（条）",
+    "hint": "超限丢最旧，队列头留截断标记",
+    "type": "int",
+    "default": 50
+  },
+  "buffer_max_total": {
+    "description": "全部会话合计缓冲上限（条）",
+    "type": "int",
+    "default": 500
+  },
+  "buffer_text_truncate": {
+    "description": "单条入队文本截断长度（字）",
+    "type": "int",
+    "default": 500
+  },
+  "day_fact_hours": {
+    "description": "白天紧凑事实行持续时长（小时）",
+    "hint": "醒来后这段时间内每轮对话注入'昨晚X点睡'事实行；0=关闭",
+    "type": "float",
+    "default": 6
+  },
+  "morning_fact_template": {
+    "description": "晨间事实行模板",
+    "hint": "变量：{sleep_time} {wake_time} {msg_count}；走临时注入不进历史",
+    "type": "text",
+    "default": "[系统信息-昨晚作息] 你昨晚 {sleep_time} 入睡、{wake_time} 醒来，睡眠期间收到 {msg_count} 条消息（附后）。"
+  },
+  "day_fact_template": {
+    "description": "白天紧凑事实行模板",
+    "hint": "变量：{sleep_time} {wake_time}",
+    "type": "text",
+    "default": "[系统信息] 昨晚作息：{sleep_time} 睡，{wake_time} 醒。"
+  },
+  "body_header_template": {
+    "description": "夜间消息拼接块头部模板",
+    "hint": "变量：{msg_count} {sleep_time} {wake_time}；此块随消息链进入对话历史",
+    "type": "text",
+    "default": "（以下是睡眠期间收到的 {msg_count} 条消息）"
+  }
+}
