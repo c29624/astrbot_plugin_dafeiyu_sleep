@@ -101,6 +101,73 @@
     "type": "float",
     "default": 50
   },
+  "wake_prefixes": {
+    "description": "私聊叫醒前缀列表（睡眠期发这些开头=摇醒她）",
+    "hint": "默认 醒醒啦/醒醒/!；清空=私聊叫醒禁用；与指令前缀(/)冲突的条目自动剔除",
+    "type": "list",
+    "default": ["醒醒啦", "醒醒", "!"],
+    "options": ["醒醒啦", "醒醒", "!"]
+  },
+  "group_wake_words": {
+    "description": "群聊叫醒词（@她+词双条件缺一不可）",
+    "hint": "消息@她且包含任一词才构成叫醒；仅@不算",
+    "type": "list",
+    "default": ["醒来", "醒醒", "起来啦", "起床啦", "别睡啦"],
+    "options": ["醒来", "醒醒", "起来啦", "起床啦", "别睡啦"]
+  },
+  "admin_only_wake": {
+    "description": "仅管理员可叫醒",
+    "hint": "开=私聊限白名单、群聊限管理员（防群友半夜玩她）；关=任何人都能叫醒，白名单失效；调试指令永远仅管理员不受此开关影响",
+    "type": "bool",
+    "default": true
+  },
+  "wake_whitelist": {
+    "description": "叫醒白名单（QQ号列表）",
+    "hint": "空=默认用AstrBot管理员名单（主人天然在内）；与管理员名单都为空则叫醒整体禁用",
+    "type": "list",
+    "default": []
+  },
+  "woken_fact_template": {
+    "description": "被叫醒状态模板（夜间）",
+    "hint": "走临时注入不进历史；无模板变量",
+    "type": "text",
+    "default": "[系统信息] 你被强行叫醒，现在半梦半醒。"
+  },
+  "nap_woken_fact_template": {
+    "description": "被叫醒状态模板（午睡版）",
+    "hint": "午睡浅、被叫醒=轻度迷糊无起床气",
+    "type": "text",
+    "default": "[系统信息] 你午睡被叫醒，才睡了一会儿，有点迷糊但没有起床气。"
+  },
+  "sleep_talk_enabled": {
+    "description": "梦话（睡眠期被戳时偶尔回一句）",
+    "hint": "插件直发不走模型零token；只回应戳她的消息（私聊/群里@她），围观闲聊不触发",
+    "type": "bool",
+    "default": true
+  },
+  "sleep_talk_chance": {
+    "description": "梦话概率（%，戳她时）",
+    "type": "float",
+    "default": 8
+  },
+  "sleep_talk_poke_chance": {
+    "description": "梦话概率（%，戳一戳时）",
+    "hint": "戳一戳是明确的戳动作，默认概率高于普通消息",
+    "type": "float",
+    "default": 25
+  },
+  "sleep_talk_cooldown_min": {
+    "description": "梦话全局冷却（分钟）",
+    "hint": "两次梦话的最小间隔（全渠道合计），防被连@刷屏",
+    "type": "float",
+    "default": 10
+  },
+  "sleep_talk_phrases": {
+    "description": "梦话语料池（随机抽一句）",
+    "hint": "可自由增删改；清空+开关开=不会发梦话",
+    "type": "list",
+    "default": ["Zzz…", "呼……zzz…", "唔……别吵……", "（翻了个身继续睡）", "呼噜……zzz……", "……唔嗯……", "（把被子蒙过头）zzz…", "……五分钟……再睡五分钟……"]
+  },
   "fixed_bedtime": {
     "description": "固定模式入睡时刻（HH:MM，仅随机模式关闭时用）",
     "type": "string",

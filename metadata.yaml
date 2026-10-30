@@ -1,6 +1,6 @@
 name: astrbot_plugin_dafeiyu_sleep
 display_name: 随机睡觉
 desc: 大肥鱼的真实作息——到点真睡（全渠道静默零token、消息入缓冲），早上真醒（知道昨晚几点睡的、看过夜里谁说了什么）。v0.1 第一步：守门+缓冲+固定作息+晨间冲刷+调试指令，fail-open。
-version: 0.2.0
+version: 0.3.1
 author: "29624"
 repo: https://github.com/c29624/astrbot_plugin_dafeiyu_sleep

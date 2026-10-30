@@ -17,7 +17,21 @@
 - /重抛作息 /强制失眠 激活；/强制入睡 HH:MM 按公式重导起床；/睡觉状态 显示今日抽签
 - random_schedule=false 时退回 v0.1 的固定作息模式
 
-后续步骤：③叫醒频道 ④临时清醒+回睡+告别语 ⑤午睡补偿+没睡醒 ⑥内置指引+配置页打磨
+第 3 步（本版，设计文档第五节）：
+- 叫醒频道（白天@必回的夜间版）：
+  · 私聊：消息以叫醒前缀列表任一项开头（默认 醒醒啦/醒醒/!，清空=禁用；
+    与 AstrBot 指令前缀冲突的条目剔除+WARNING）
+  · 群聊：@她 + 叫醒词双条件缺一不可（默认 醒来/醒醒/起来啦/起床啦/别睡啦）
+  · 权限开关仅管理员可叫醒（默认开）：私聊=叫醒白名单（默认=AstrBot管理员名单，皆空则整体禁用）；
+    群聊=仅白名单/管理员；开关=0 时任何人都能叫醒。无权限=静默入队不解释
+  · 叫醒即冲刷：来源会话积压随叫醒请求注入（她翻未读）；其他会话不动
+  · 起床气注入：被叫醒状态模板走 extra parts（半梦半醒）；午睡被叫醒=直接结束转清醒、轻度迷糊无起床气
+- 叫醒=彻底转醒（临时清醒/智能回睡是第4步；届时叫醒改走临时清醒流程）
+
+v0.3.1：新增"梦话"——睡眠期被戳（私聊/群里@她/戳一戳）按概率回一句可配置的梦话
+（插件直发零token，全局冷却防刷屏，围观闲聊不触发；戳一戳概率独立可调）
+
+后续步骤：④临时清醒+回睡+告别语 ⑤午睡补偿+没睡醒 ⑥内置指引+配置页打磨
 """
 
 import asyncio
@@ -42,11 +56,12 @@ except ImportError:  # 版本变动时的兜底（fail-open：注入失败不拦
     TextPart = None
 
 try:
-    from astrbot.core.message.components import Plain
+    from astrbot.core.message.components import At, Plain
 except ImportError:
-    Plain = None
+    At, Plain = None, None
 
 PLUGIN_NAME = "astrbot_plugin_dafeiyu_sleep"
+PLUGIN_VERSION = "0.3.1"
 STATE_FILE = "sleep_state.json"
 
 PHASE_AWAKE = "awake"
@@ -80,6 +95,26 @@ DEFAULTS = {
     "day_fact_hours": 6.0,
     "fixed_bedtime": "23:00",
     "fixed_waketime": "07:00",
+    "wake_prefixes": ["醒醒啦", "醒醒", "!"],
+    "group_wake_words": ["醒来", "醒醒", "起来啦", "起床啦", "别睡啦"],
+    "admin_only_wake": True,
+    "wake_whitelist": [],
+    "woken_fact_template": "[系统信息] 你被强行叫醒，现在半梦半醒。",
+    "nap_woken_fact_template": "[系统信息] 你午睡被叫醒，才睡了一会儿，有点迷糊但没有起床气。",
+    "sleep_talk_enabled": True,
+    "sleep_talk_chance": 8.0,
+    "sleep_talk_poke_chance": 25.0,
+    "sleep_talk_cooldown_min": 10.0,
+    "sleep_talk_phrases": [
+        "Zzz…",
+        "呼……zzz…",
+        "唔……别吵……",
+        "（翻了个身继续睡）",
+        "呼噜……zzz……",
+        "……唔嗯……",
+        "（把被子蒙过头）zzz…",
+        "……五分钟……再睡五分钟……",
+    ],
 }
 
 
@@ -110,7 +145,7 @@ def _fmt_hm(ts):
     return datetime.fromtimestamp(ts).strftime("%H:%M")
 
 
-@register(PLUGIN_NAME, "29624", "大肥鱼的真实作息：到点真睡、早上真醒、记得夜里谁说了什么", "0.2.0")
+@register(PLUGIN_NAME, "29624", "大肥鱼的真实作息：到点真睡、早上真醒、记得夜里谁说了什么", "0.3.0")
 class DafeiyuSleepPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -126,6 +161,8 @@ class DafeiyuSleepPlugin(Star):
         self._night = None  # 今日/今夜抽签记录（dict，见 _roll_tonight）
         self._last_night = None  # 上一夜完成记录（失眠标记留给第5步）
         self._debt_minutes = 0.0  # 睡眠债（第4步临时清醒累计，第2步先建字段）
+        self._is_nap = False  # 当前睡眠窗口是否午睡（叫醒演出区分用）
+        self._last_sleep_talk = 0.0  # 上次说梦话的时刻（全局冷却）
         self._lock = asyncio.Lock()
         self._tick_task = None
         self._data_dir = None
@@ -264,6 +301,59 @@ class DafeiyuSleepPlugin(Star):
             pass
         self.cmd_prefixes = tuple(dict.fromkeys(prefixes))
 
+        # ---- 叫醒频道配置（设计文档第五节） ----
+        self.tpl_woken = str(cfg.get("woken_fact_template", DEFAULTS["woken_fact_template"]))
+        self.tpl_nap_woken = str(
+            cfg.get("nap_woken_fact_template", DEFAULTS["nap_woken_fact_template"])
+        )
+
+        raw_pfx = cfg.get("wake_prefixes", DEFAULTS["wake_prefixes"])
+        if not isinstance(raw_pfx, list):
+            raw_pfx = DEFAULTS["wake_prefixes"]
+        pfx = []
+        for item in raw_pfx:
+            s = str(item).strip()
+            if not s:
+                continue
+            if s in self.cmd_prefixes:  # 与指令前缀冲突：剔除该条并警告，其余不受影响
+                logger.warning(f"[睡觉] 叫醒前缀 '{s}' 与指令前缀冲突，已剔除")
+                continue
+            pfx.append(s)
+        self.c_wake_prefixes = tuple(dict.fromkeys(pfx))  # 空=私聊叫醒禁用
+
+        raw_words = cfg.get("group_wake_words", DEFAULTS["group_wake_words"])
+        if not isinstance(raw_words, list):
+            raw_words = DEFAULTS["group_wake_words"]
+        self.c_group_wake_words = tuple(
+            dict.fromkeys(str(w).strip() for w in raw_words if str(w).strip())
+        )
+
+        self.c_admin_only_wake = bool(cfg.get("admin_only_wake", DEFAULTS["admin_only_wake"]))
+        raw_wl = cfg.get("wake_whitelist", [])
+        if not isinstance(raw_wl, list):
+            raw_wl = []
+        wake_ids = [str(x).strip() for x in raw_wl if str(x).strip()]
+        if not wake_ids:  # 默认=AstrBot管理员名单（主人QQ天然在内）
+            try:
+                wake_ids = [str(a) for a in self.context.get_config().get("admins_id", [])]
+            except Exception:
+                wake_ids = []
+        if self.c_admin_only_wake and not wake_ids:
+            logger.warning("[睡觉] 叫醒白名单与管理员名单均为空，叫醒频道整体禁用")
+        self._wake_ids = set(wake_ids)
+
+        # ---- 梦话（睡眠期被戳时偶尔冒一句，插件直发零token） ----
+        self.c_sleep_talk_on = bool(cfg.get("sleep_talk_enabled", DEFAULTS["sleep_talk_enabled"]))
+        self.c_sleep_talk_chance = num("sleep_talk_chance", 0, 100)
+        self.c_sleep_talk_poke_chance = num("sleep_talk_poke_chance", 0, 100)
+        self.c_sleep_talk_cd = num("sleep_talk_cooldown_min", 0, 1440)
+        raw_ph = cfg.get("sleep_talk_phrases", DEFAULTS["sleep_talk_phrases"])
+        if not isinstance(raw_ph, list):
+            raw_ph = DEFAULTS["sleep_talk_phrases"]
+        self.c_sleep_talk_phrases = tuple(
+            dict.fromkeys(str(s).strip() for s in raw_ph if str(s).strip())
+        )
+
     # ---------- 生命周期 ----------
 
     async def initialize(self):
@@ -281,7 +371,7 @@ class DafeiyuSleepPlugin(Star):
         self._load_state()
         self._startup_recover()
         self._tick_task = asyncio.create_task(self._tick_loop())
-        line = f"[睡觉] v0.2 已启动：状态={self.phase}"
+        line = f"[睡觉] v{PLUGIN_VERSION} 已启动：状态={self.phase}"
         if self.schedule_random:
             n = self._night
             if n:
@@ -324,6 +414,7 @@ class DafeiyuSleepPlugin(Star):
             self._night = data.get("night")
             self._last_night = data.get("last_night")
             self._debt_minutes = float(data.get("debt_minutes", 0))
+            self._is_nap = bool(data.get("is_nap", False))
         except Exception:
             logger.warning("[睡觉] 状态文件损坏，按全新状态启动（缓冲可能丢失）")
 
@@ -341,6 +432,7 @@ class DafeiyuSleepPlugin(Star):
                 "night": self._night,
                 "last_night": self._last_night,
                 "debt_minutes": self._debt_minutes,
+                "is_nap": self._is_nap,
                 "saved_at": time.time(),
             }
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -529,9 +621,10 @@ class DafeiyuSleepPlugin(Star):
                     if bed.timestamp() <= now < wake.timestamp():
                         await self._enter_sleep(bed.timestamp(), wake.timestamp())
 
-    async def _enter_sleep(self, bed_ts, wake_ts, note=""):
+    async def _enter_sleep(self, bed_ts, wake_ts, note="", nap=False):
         self.phase = PHASE_SLEEPING
         self._sleep_window = (bed_ts, wake_ts)
+        self._is_nap = nap
         self._morning_pending = {}
         self._save_state()
         logger.info(
@@ -620,9 +713,15 @@ class DafeiyuSleepPlugin(Star):
                 if umo in self._morning_pending:
                     self._flush_morning_into(event, umo)
                 return
+            # 睡眠期：先查叫醒频道（白天@必回的夜间版），命中→转醒并放行本条
+            wake_kind = self._check_wake(event, umo, text)
+            if wake_kind:
+                await self._wake_by_channel(event, umo, wake_kind)
+                return  # 不 stop_event：叫醒消息正常走管线，她半梦半醒地回
             self._buffer_message(event, umo, text)
         event.stop_event()
         self._save_state()
+        await self._maybe_sleep_talk(event, umo)
 
     def _buffer_message(self, event: AstrMessageEvent, umo: str, text: str):
         entry_text = text
@@ -675,6 +774,100 @@ class DafeiyuSleepPlugin(Star):
             else:
                 break
 
+    # ---------- 叫醒频道（设计文档第五节：白天@必回的夜间版） ----------
+
+    def _at_bot(self, event: AstrMessageEvent) -> bool:
+        if At is None:
+            return False
+        try:
+            self_id = str(event.get_self_id())
+            for comp in event.get_messages():
+                if isinstance(comp, At) and str(getattr(comp, "qq", "")) == self_id:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _wake_allowed(self, event: AstrMessageEvent) -> bool:
+        if not self.c_admin_only_wake:
+            return True  # 放养模式：任何人都能叫醒
+        try:
+            sid = str(event.get_sender_id() or "")
+        except Exception:
+            return False
+        return sid in self._wake_ids
+
+    def _check_wake(self, event: AstrMessageEvent, umo: str, text: str):
+        """返回 None=不构成叫醒（照常缓冲）；'night'=夜间叫醒；'nap'=午睡叫醒"""
+        if not text:
+            return None
+        kind = "nap" if self._is_nap else "night"
+        if ":FriendMessage:" in umo:
+            if not self.c_wake_prefixes:
+                return None  # 前缀列表清空=私聊叫醒禁用
+            if not any(text.startswith(p) for p in self.c_wake_prefixes):
+                return None
+            return kind if self._wake_allowed(event) else None  # 无权限=静默入队
+        # 群聊：@她 + 叫醒词双条件缺一不可
+        if not any(w in text for w in self.c_group_wake_words):
+            return None
+        if not self._at_bot(event):
+            return None
+        return kind if self._wake_allowed(event) else None
+
+    async def _wake_by_channel(self, event: AstrMessageEvent, umo: str, wake_kind: str):
+        """被叫醒：转清醒（第3步=彻底醒，第4步改临时清醒）+ 叫醒即冲刷来源会话 + 状态行注入"""
+        now = time.time()
+        self._set_morning_pending(now)  # 全部有积压的会话登记晨间事实（各随其下次请求注入）
+        self.phase = PHASE_AWAKE
+        self._wake_at = now
+        if wake_kind != "nap":
+            self._finish_night(now)
+        # 叫醒即冲刷：来源会话积压随本条消息注入（她翻未读）
+        self._flush_morning_into(event, umo)
+        info = self._morning_pending.get(umo + "#fact")
+        if info is None:  # 来源会话无积压（这是睡眠期第一条）——仍给作息事实+状态行
+            bed_ts, wake_ts = self._sleep_window or (now, now)
+            info = {"sleep_time": _fmt_hm(bed_ts), "wake_time": _fmt_hm(now), "msg_count": 0}
+        info["woken"] = wake_kind
+        self._morning_pending[umo + "#fact"] = info
+        self._save_state()
+        logger.info(
+            f"[睡觉] 被叫醒（{'午睡' if wake_kind == 'nap' else '夜间'}，来源 {umo}），"
+            f"叫醒即冲刷完成，回复带{'轻度迷糊' if wake_kind == 'nap' else '半梦半醒'}状态"
+        )
+
+    def _is_poke(self, event: AstrMessageEvent) -> bool:
+        try:
+            return any(type(c).__name__ == "Poke" for c in event.get_messages())
+        except Exception:
+            return False
+
+    async def _maybe_sleep_talk(self, event: AstrMessageEvent, umo: str):
+        """梦话：睡眠期被戳（私聊/群里@她/戳一戳）按概率直发一句可配置梦话。
+
+        零 token（不走模型）；全局冷却防刷屏；围观闲聊不触发（只回应戳她的人）；
+        戳一戳是明确的"戳"动作，概率独立配置（默认高于普通消息）。
+        """
+        if not self.c_sleep_talk_on or not self.c_sleep_talk_phrases:
+            return
+        now = time.time()
+        if now - self._last_sleep_talk < self.c_sleep_talk_cd * 60:
+            return
+        is_poke = self._is_poke(event)
+        if not is_poke and ":FriendMessage:" not in umo and not self._at_bot(event):
+            return  # 群里只被@才冒梦话，路人闲聊不理
+        chance = self.c_sleep_talk_poke_chance if is_poke else self.c_sleep_talk_chance
+        if random.random() * 100 >= chance:
+            return
+        self._last_sleep_talk = now
+        line = random.choice(self.c_sleep_talk_phrases)
+        try:
+            await self.context.send_message(umo, MessageChain().message(line))
+            logger.info(f"[睡觉] 梦话：{umo} <- {line}")
+        except Exception:
+            logger.warning("[睡觉] 梦话发送失败（不影响缓冲）", exc_info=True)
+
     def _flush_morning_into(self, event: AstrMessageEvent, umo: str):
         """晨间冲刷：夜间消息本体拼进消息链（入历史→反思引擎可读），事实行走 extra 注入"""
         buf = self._buffers.pop(umo, [])
@@ -720,6 +913,11 @@ class DafeiyuSleepPlugin(Star):
                         msg_count=info["msg_count"],
                     )
                 )
+                # 被叫醒状态行（午睡版轻度迷糊、夜间版半梦半醒）
+                if info.get("woken") == "nap":
+                    parts.append(self.tpl_nap_woken)
+                elif info.get("woken"):
+                    parts.append(self.tpl_woken)
             if (
                 self._wake_at
                 and self.day_fact_hours > 0
@@ -767,6 +965,13 @@ class DafeiyuSleepPlugin(Star):
             f"{_fmt_hm(n.get('wake_ts', time.time()))} 醒，时长 {n.get('dur_min', 0):.0f} 分钟{tag}"
         )
 
+    def _wake_line(self):
+        who = "仅白名单/管理员" if self.c_admin_only_wake else "任何人"
+        return (
+            f"叫醒频道：私聊前缀 {'/'.join(self.c_wake_prefixes) or '（禁用）'}；"
+            f"群@+词 {'/'.join(self.c_group_wake_words) or '（禁用）'}｜{who}"
+        )
+
     @filter.command("睡觉状态")
     async def cmd_status(self, event: AstrMessageEvent, args=None):
         """查看当前状态、今日作息抽签、缓冲条数"""
@@ -780,14 +985,14 @@ class DafeiyuSleepPlugin(Star):
             yield event.plain_result(
                 f"状态：睡眠中（{_fmt_hm(bed_ts)} 入睡，预计 {_fmt_hm(wake_ts)} 醒，还有约{left}分钟）\n"
                 f"{self._night_line() if self.schedule_random else ''}\n"
-                f"夜间缓冲：{total} 条（{len(self._buffers)} 个会话）"
+                f"夜间缓冲：{total} 条（{len(self._buffers)} 个会话）\n{self._wake_line()}"
             )
         else:
             sched = self._night_line() if self.schedule_random else (
                 f"固定作息：{self.bed_min // 60:02d}:{self.bed_min % 60:02d} 睡 → "
                 f"{self.wake_min // 60:02d}:{self.wake_min % 60:02d} 醒"
             )
-            yield event.plain_result(f"状态：清醒\n{sched}")
+            yield event.plain_result(f"状态：清醒\n{sched}\n{self._wake_line()}")
 
     @filter.command("强制入睡")
     async def cmd_force_sleep(self, event: AstrMessageEvent, args=None):
@@ -852,7 +1057,7 @@ class DafeiyuSleepPlugin(Star):
         wake = now_dt + timedelta(minutes=minutes)
         async with self._lock:
             await self._enter_sleep(
-                now_dt.timestamp(), wake.timestamp(), note=f"（午睡{minutes}分钟）"
+                now_dt.timestamp(), wake.timestamp(), note=f"（午睡{minutes}分钟）", nap=True
             )
         yield event.plain_result(f"眯 {minutes} 分钟，到点自动醒")
 
