@@ -127,7 +127,8 @@ DEFAULTS = {
     "night_fact_from": "20:00",  # 夜间事实行起点（off/关闭=不注入）
     "night_fact_template": (
         "[系统信息] 今晚你计划 {bed_time} 左右才睡——现在离入睡还早，"
-        "别说\"这就去睡/我也要睡了\"，要回应对方告别就说自己还要再待一会儿。"
+        "别说\"这就去睡/我也要睡了\"；这个时刻自己知道就行，别把具体几点告诉对方，"
+        "被问或要回应告别就说今晚睡得晚、让对方先睡。"
     ),
     "fixed_bedtime": "23:00",
     "fixed_waketime": "07:00",
@@ -267,7 +268,7 @@ def _render(tpl: str, **kw) -> str:
         return str(tpl)
 
 
-@register(PLUGIN_NAME, "29624", "大肥鱼的真实作息：到点真睡、早上真醒、记得夜里谁说了什么", PLUGIN_VERSION)
+@register(PLUGIN_NAME, "c29624", "大肥鱼的真实作息：到点真睡、早上真醒、记得夜里谁说了什么", PLUGIN_VERSION)
 class DafeiyuSleepPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
