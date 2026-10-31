@@ -717,6 +717,18 @@
         "type": "text",
         "default": "[系统信息] 昨晚作息：{sleep_time} 睡，{wake_time} 醒。"
       },
+      "night_fact_from": {
+        "description": "夜间事实行·几点起注入",
+        "hint": "从这时刻到她今晚入睡点之间，每轮注入「今晚计划几点睡」——她聊天时就不会跟着对方说\"我也要睡了\"（实际还差俩小时=穿帮），会自然回\"你再睡，我等会儿才睡\"。格式 HH:MM 默认 20:00；填 off=关。跨0点后到入睡前照常注入（8点前）",
+        "type": "string",
+        "default": "20:00"
+      },
+      "night_fact_template": {
+        "description": "夜间事实行模板",
+        "hint": "变量：{bed_time}=今晚计划入睡时刻；临时注入不进历史。想让她报得模糊点（\"后半夜\"）可自己改写",
+        "type": "text",
+        "default": "[系统信息] 今晚你计划 {bed_time} 左右才睡——现在离入睡还早，别说\"这就去睡/我也要睡了\"，要回应对方告别就说自己还要再待一会儿。"
+      },
       "body_header_template": {
         "description": "夜间消息块头部模板",
         "hint": "变量：{msg_count} {sleep_time} {wake_time}；此块随消息链进对话历史",

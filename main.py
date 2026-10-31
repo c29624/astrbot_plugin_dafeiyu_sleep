@@ -90,7 +90,7 @@ except ImportError:
     At, Json, Plain = None, None, None
 
 PLUGIN_NAME = "astrbot_plugin_dafeiyu_sleep"
-PLUGIN_VERSION = "0.7.0"
+PLUGIN_VERSION = "0.7.1"
 STATE_FILE = "sleep_state.json"
 
 PHASE_AWAKE = "awake"
@@ -124,6 +124,11 @@ DEFAULTS = {
     "buffer_max_total": 500,
     "buffer_text_truncate": 500,
     "day_fact_hours": 6.0,
+    "night_fact_from": "20:00",  # 夜间事实行起点（off/关闭=不注入）
+    "night_fact_template": (
+        "[系统信息] 今晚你计划 {bed_time} 左右才睡——现在离入睡还早，"
+        "别说\"这就去睡/我也要睡了\"，要回应对方告别就说自己还要再待一会儿。"
+    ),
     "fixed_bedtime": "23:00",
     "fixed_waketime": "07:00",
     "wake_prefixes": ["醒醒啦", "醒醒", "!"],
@@ -469,6 +474,15 @@ class DafeiyuSleepPlugin(Star):
         self.tpl_day_fact = str(
             cfg.get("day_fact_template", "[系统信息] 昨晚作息：{sleep_time} 睡，{wake_time} 醒。")
         )
+        # 夜间事实行（防穿帮：离入睡还早时她聊天里别演"这就去睡"）
+        raw_nff = str(cfg.get("night_fact_from", "20:00")).strip()
+        if raw_nff.lower() in ("off", "关", "关闭"):
+            self.night_fact_from = None  # 显式关
+        else:
+            self.night_fact_from = _parse_hhmm(raw_nff)
+            if self.night_fact_from is None:
+                self.night_fact_from = 20 * 60  # 非法回落默认（数值类铁律）
+        self.tpl_night_fact = str(cfg.get("night_fact_template", DEFAULTS["night_fact_template"]))
         self.tpl_body_header = str(
             cfg.get("body_header_template", "（以下是睡眠期间收到的 {msg_count} 条消息）")
         )
@@ -1598,6 +1612,21 @@ class DafeiyuSleepPlugin(Star):
                         wake_time=_fmt_hm(wake_ts),
                     )
                 )
+            # 夜间事实行：离入睡还早别演"这就去睡"（聊天里说"我也睡了"实际还没到点=穿帮；
+            # 对方道晚安她该说"你再玩会儿/我等下才睡"而不是跟着说要睡）
+            if self.night_fact_from is not None and self.phase != PHASE_SLEEPING:
+                nnow = time.time()
+                nbed = 0.0
+                nrec = self._night or {}
+                if nrec.get("anchor") == datetime.now().date().isoformat():
+                    nbed = float(nrec.get("bed_ts") or 0)
+                if not nbed and self._sleep_window and self._sleep_window[0] > nnow:
+                    nbed = float(self._sleep_window[0])
+                if nbed and nnow < nbed:
+                    ndt = datetime.fromtimestamp(nnow)
+                    nm = ndt.hour * 60 + ndt.minute
+                    if nm >= self.night_fact_from or nm < 8 * 60:  # 起点后到入睡；跨0点续到早8点前
+                        parts.append(_render(self.tpl_night_fact, bed_time=_fmt_hm(nbed)))
             for p in parts:
                 req.extra_user_content_parts.append(TextPart(text=p).mark_as_temp())
         except Exception:
