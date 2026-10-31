@@ -1,221 +1,572 @@
 {
-  "enabled": {
-    "description": "启用睡觉插件",
-    "type": "bool",
-    "default": true
+  "basic": {
+    "description": "🌙 基础",
+    "type": "object",
+    "hint": "总开关与作息模式；只想填5项就开「简单配置」，想逐项微调就关掉它",
+    "items": {
+      "enabled": {
+        "description": "总开关",
+        "hint": "关=插件完全停摆（不守门不抽签）",
+        "type": "bool",
+        "default": true
+      },
+      "random_schedule": {
+        "description": "随机作息模式",
+        "hint": "开=每晚抽签入睡/起床（推荐）；关=用最底部「固定模式」的时刻",
+        "type": "bool",
+        "default": true
+      },
+      "quick_mode": {
+        "description": "简单配置（懒人模式）",
+        "hint": "开=入睡/起床/赖床参数全部由「快速设定」5项自动派生，下面详细区的对应项不生效；关=详细区逐项生效。仅随机作息模式开启时有用，固定模式不受影响",
+        "type": "bool",
+        "default": false
+      }
+    }
   },
-  "random_schedule": {
-    "description": "随机作息模式（每日抽签入睡时刻+时长推导起床）",
-    "hint": "关闭则退回固定作息（用下面两项）；数值类配置超出范围自动回落默认并记日志",
-    "type": "bool",
-    "default": true
+  "quick": {
+    "description": "⚡ 快速设定（简单配置开启时生效）",
+    "type": "object",
+    "hint": "只填这5项就能跑：日常入睡窗=最早睡觉~最早睡觉+范围，再赖也不会晚于最晚起床醒。以下仍需去详细区调（开了简单配置也生效）：睡眠时长与波动、周末加成幅度、失眠概率、早睡偶发赖床、睡眠债折算；其余时刻/赖床项均由这5项派生",
+    "items": {
+      "quick_earliest_bed": {
+        "description": "绝对最早睡觉",
+        "hint": "她任何时候不会早于这个点入睡，日常入睡窗从这点往后排",
+        "type": "string",
+        "default": "23:00"
+      },
+      "quick_bed_range_min": {
+        "description": "入睡可接受范围（分钟）",
+        "hint": "日常入睡窗的宽度：最早睡觉+范围=最晚入睡。推荐 60~150，默认 90",
+        "type": "float",
+        "slider": {
+          "min": 30,
+          "max": 300,
+          "step": 15
+        },
+        "default": 90
+      },
+      "quick_latest_wake": {
+        "description": "绝对最晚起床",
+        "hint": "她再赖也绝不会晚于这个点醒（含失眠夜和周末）；周末加成自动被这个框收住",
+        "type": "string",
+        "default": "09:30"
+      },
+      "quick_oversleep_max_chance": {
+        "description": "赖床最高概率（%）",
+        "hint": "睡到最晚入睡点时的赖床概率（再晚还会继续加，封顶100）。推荐 50~80，默认 70",
+        "type": "float",
+        "slider": {
+          "min": 10,
+          "max": 100,
+          "step": 5
+        },
+        "default": 70
+      },
+      "quick_oversleep_max_min": {
+        "description": "赖床可接受时间（分钟）",
+        "hint": "掷中赖床后最多多睡这么久（最少约为它的1/4）。推荐 20~60，默认 40",
+        "type": "float",
+        "slider": {
+          "min": 10,
+          "max": 120,
+          "step": 5
+        },
+        "default": 40
+      }
+    }
   },
-  "bedtime_base": {
-    "description": "基准入睡点（HH:MM，围绕它近正态波动）",
-    "type": "string",
-    "default": "23:00"
+  "bedtime": {
+    "description": "🛏️ 入睡时刻",
+    "type": "object",
+    "hint": "她几点睡由这一区决定：围绕基准点波动，硬边界内必睡；10%概率失眠夜拖到最晚；简单配置开启时本区时刻项由「快速设定」派生取代",
+    "items": {
+      "bedtime_base": {
+        "description": "基准入睡点",
+        "hint": "推荐 22:00~01:00，默认 23:00；入睡分布的峰（她通常几点睡），最早/最晚只是硬剪刀——填窗口正中间=对称不偏；⚠️简单配置开启时此项不生效（由快速设定派生）",
+        "type": "string",
+        "default": "23:00"
+      },
+      "bedtime_earliest": {
+        "description": "最早入睡",
+        "hint": "推荐 基准-30~-60分钟，默认 22:15；调早→她偶尔睡得更早；⚠️简单配置开启时此项不生效（由快速设定派生）",
+        "type": "string",
+        "default": "22:15"
+      },
+      "bedtime_latest": {
+        "description": "最晚入睡",
+        "hint": "推荐 基准+60~+120分钟，默认 01:10；调晚→熬夜上限抬高（给起床留够睡眠时长）；⚠️简单配置开启时此项不生效（由快速设定派生）",
+        "type": "string",
+        "default": "01:10"
+      },
+      "insomnia_chance": {
+        "description": "失眠夜概率（%）",
+        "hint": "推荐 5~15，默认 10；调大→更常抽到熬夜到凌晨的失眠夜；简单配置开启时此项仍生效",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 5
+        },
+        "default": 10
+      },
+      "insomnia_latest": {
+        "description": "失眠夜最晚",
+        "hint": "推荐 02:00~03:30，默认 02:30；必须晚于最晚入睡；失眠夜次日必赖床；⚠️简单配置开启时此项不生效（由快速设定派生）",
+        "type": "string",
+        "default": "02:30"
+      }
+    }
   },
-  "bedtime_earliest": {
-    "description": "最早入睡（HH:MM，硬边界）",
-    "type": "string",
-    "default": "22:15"
+  "wake": {
+    "description": "⏰ 时长与起床",
+    "type": "object",
+    "hint": "起床不直接配，=入睡+睡眠时长，再夹在最早/硬顶之间；晚睡必晚起；简单配置开启时本区时刻项由「快速设定」派生取代",
+    "items": {
+      "sleep_hours_base": {
+        "description": "基准睡眠时长（小时）",
+        "hint": "推荐 7~8.5，默认 7.5；简单配置开启时此项仍生效",
+        "type": "float",
+        "slider": {
+          "min": 5,
+          "max": 12,
+          "step": 0.25
+        },
+        "default": 7.5
+      },
+      "sleep_hours_sigma": {
+        "description": "时长波动（小时）",
+        "hint": "她每晚睡的时长都不一样：围绕基准时长上下浮动这么多。默认1小时=常见夜睡6.5~8.5小时、偶尔5.5或9.5（超界的被起床窗夹住）；0.3=几乎每晚睡一样长。调大→更像真人（有的夜缺觉有的夜补觉），调小→规律得像机器。推荐0.5~1.5，默认1；简单配置开启时此项仍生效",
+        "type": "float",
+        "slider": {
+          "min": 0.2,
+          "max": 2,
+          "step": 0.1
+        },
+        "default": 1
+      },
+      "weekend_extra_min": {
+        "description": "周末加成下限（分钟）",
+        "hint": "周末多睡多少：周六/周日醒来比平时多睡的分钟数，在'下限~上限'之间随机抽（默认30~90=多睡半小时到一个半小时，每个周末抽得不一样）。周末按醒来那天算：周五熬夜周六醒=算周末。想每周固定多睡就把下限上限填成一样。推荐20~45，默认30；简单配置开启时此项仍生效",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 120,
+          "step": 5
+        },
+        "default": 30
+      },
+      "weekend_extra_max": {
+        "description": "周末加成上限（分钟）",
+        "hint": "周末多睡随机范围的上限（配上面的下限，多睡量在两者之间抽）；多睡再多也会被'最晚起床'收住、不会穿破。推荐60~120，默认90；简单配置开启时此项仍生效",
+        "type": "float",
+        "slider": {
+          "min": 30,
+          "max": 180,
+          "step": 5
+        },
+        "default": 90
+      },
+      "wake_earliest": {
+        "description": "最早起床",
+        "hint": "推荐 06:30~07:30，默认 06:40；睡得再饱也不会早于这个点醒；⚠️简单配置开启时此项不生效（由快速设定派生）",
+        "type": "string",
+        "default": "06:40"
+      },
+      "wake_hardcap": {
+        "description": "最晚起床硬顶",
+        "hint": "推荐 08:30~10:00，默认 09:30；再困也得起（保白天在线）；调晚→失眠夜能多睡会儿；⚠️简单配置开启时此项不生效（由快速设定派生）",
+        "type": "string",
+        "default": "09:30"
+      }
+    }
   },
-  "bedtime_latest": {
-    "description": "最晚入睡（HH:MM，硬边界；跨午夜如 01:10）",
-    "type": "string",
-    "default": "01:10"
+  "oversleep": {
+    "description": "🛌 赖床与睡眠债",
+    "type": "object",
+    "hint": "晚睡过了阈值开始掷赖床骰：基础概率+每再晚一个步长加一档；被叫醒聊天欠的觉折成顺延；简单配置开启时本区阈值/概率/加成由「快速设定」派生取代",
+    "items": {
+      "oversleep_threshold": {
+        "description": "赖床判定阈值",
+        "hint": "推荐 最晚入睡前30~60分钟，默认 00:30；晚于此点睡才开始高概率掷赖床骰；⚠️简单配置开启时此项不生效（由快速设定派生）",
+        "type": "string",
+        "default": "00:30"
+      },
+      "oversleep_base": {
+        "description": "赖床基础概率（%）",
+        "hint": "推荐 40~60，默认 50；入睡过了阈值后的起始赖床概率；⚠️简单配置开启时此项不生效（由快速设定派生）",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 5
+        },
+        "default": 50
+      },
+      "oversleep_step_minutes": {
+        "description": "递增步长（分钟）",
+        "hint": "推荐 15~45，默认 30；调小→概率涨得更陡（晚睡一点就大幅赖床）；⚠️简单配置开启时此项不生效（由快速设定派生）",
+        "type": "float",
+        "slider": {
+          "min": 5,
+          "max": 240,
+          "step": 5
+        },
+        "default": 30
+      },
+      "oversleep_per_30": {
+        "description": "每步长加成（%）",
+        "hint": "推荐 10~20，默认 15；封顶100%；和步长搭配用；⚠️简单配置开启时此项不生效（由快速设定派生）",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 5
+        },
+        "default": 15
+      },
+      "oversleep_bonus_min": {
+        "description": "赖床加成下限（分钟）",
+        "hint": "推荐 10~20，默认 10；掷中赖床后至少多睡这么久；⚠️简单配置开启时此项不生效（由快速设定派生）",
+        "type": "float",
+        "slider": {
+          "min": 5,
+          "max": 60,
+          "step": 5
+        },
+        "default": 10
+      },
+      "oversleep_bonus_max": {
+        "description": "赖床加成上限（分钟）",
+        "hint": "推荐 30~60，默认 40；调大→赖床赖得更狠；⚠️简单配置开启时此项不生效（由快速设定派生）",
+        "type": "float",
+        "slider": {
+          "min": 10,
+          "max": 120,
+          "step": 5
+        },
+        "default": 40
+      },
+      "earlybed_oversleep_chance": {
+        "description": "早睡偶发赖床概率（%）",
+        "hint": "推荐 5~15，默认 10；没到阈值也偶尔赖床（真·人类行为）；简单配置开启时此项仍生效",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 50,
+          "step": 5
+        },
+        "default": 10
+      },
+      "debt_ratio": {
+        "description": "睡眠债折算比例（%）",
+        "hint": "推荐 30~70，默认 50；夜里被叫醒聊 N 分钟→起床多睡 N×此比例；简单配置开启时此项仍生效",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 5
+        },
+        "default": 50
+      }
+    }
   },
-  "insomnia_chance": {
-    "description": "失眠夜概率（%）",
-    "hint": "命中则入睡拖到最晚入睡~失眠上限之间，且次日必赖床",
-    "type": "float",
-    "default": 10
+  "wake_channel": {
+    "description": "📣 叫醒频道",
+    "type": "object",
+    "hint": "睡觉时@必回的替代通道：私聊发前缀、群里@她+叫醒词；无权限的人叫=静默",
+    "items": {
+      "wake_prefixes": {
+        "description": "私聊叫醒前缀列表",
+        "hint": "默认 醒醒啦/醒醒/!；清空=私聊叫醒禁用；与指令前缀(/)冲突的条目自动剔除",
+        "type": "list",
+        "default": [
+          "醒醒啦",
+          "醒醒",
+          "!"
+        ]
+      },
+      "group_wake_words": {
+        "description": "群聊叫醒词",
+        "hint": "@她且包含任一词才算叫醒（双条件缺一不可，仅@不算）；加词→更容易叫醒",
+        "type": "list",
+        "default": [
+          "醒来",
+          "醒醒",
+          "起来啦",
+          "起床啦",
+          "别睡啦"
+        ]
+      },
+      "admin_only_wake": {
+        "description": "仅管理员可叫醒",
+        "hint": "开=私聊限白名单、群聊限管理员（防群友半夜玩她）；关=任何人都能叫醒；调试指令永远仅管理员",
+        "type": "bool",
+        "default": true
+      },
+      "wake_whitelist": {
+        "description": "叫醒白名单（QQ号）",
+        "hint": "空=自动用 AstrBot 管理员名单（主人天然在内）；两样都空=叫醒整体禁用",
+        "type": "list",
+        "default": []
+      }
+    }
   },
-  "insomnia_latest": {
-    "description": "失眠夜最晚（HH:MM）",
-    "type": "string",
-    "default": "02:30"
+  "temp_wake": {
+    "description": "😪 临时清醒与回睡",
+    "type": "object",
+    "hint": "被叫醒后的时间线：先撑满「最短清醒」（这期间不看冷场）→ 之后冷场满「冷场判定」就回睡 → 到「最长清醒上限」无论如何强制回睡；欠的觉折成第二天晚起",
+    "items": {
+      "temp_wake_min_minutes": {
+        "description": "最短清醒时长（分钟）",
+        "hint": "被叫醒后至少撑这么久，这期间哪怕没人说话也不回睡（防'半夜戳一下她秒睡回去'太假）；期满后才开始看冷场。推荐 30~60，默认 40",
+        "type": "float",
+        "slider": {
+          "min": 10,
+          "max": 90,
+          "step": 5
+        },
+        "default": 40
+      },
+      "temp_wake_max_minutes": {
+        "description": "最长清醒上限（分钟）",
+        "hint": "清醒的绝对上限：就算一直有人聊，到点也说句告别语强制回睡。推荐 60~120，默认 90；须≥最短清醒",
+        "type": "float",
+        "slider": {
+          "min": 30,
+          "max": 240,
+          "step": 10
+        },
+        "default": 90
+      },
+      "cold_field_minutes": {
+        "description": "冷场判定（分钟）",
+        "hint": "最短清醒期满后起表：连续这么久没有任何人跟她说话→回睡。任何互动都重置计时；私聊在聊=群里也不算冷场（全渠道共用一个表）。推荐 3~10，默认 5",
+        "type": "float",
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
+        "default": 5
+      },
+      "nicknames": {
+        "description": "应答昵称列表",
+        "hint": "冷场判定用；加得越多→'在跟她说话'越容易被判定（冷场更难触发）",
+        "type": "list",
+        "default": [
+          "大肥鱼",
+          "肥鱼",
+          "小鲸鱼"
+        ]
+      },
+      "farewell_llm_enabled": {
+        "description": "回睡告别语 LLM 临场生成",
+        "hint": "开=回睡前调一次模型现场编一句（带人设味）；失败/超时自动用语料池",
+        "type": "bool",
+        "default": true
+      },
+      "farewell_prompt_template": {
+        "description": "告别语生成 prompt",
+        "hint": "人设会自动拼在前面；这里只写任务要求",
+        "type": "text",
+        "default": "你要继续睡了，按你平时的语气跟对方道个别。就一句话，短短的，别提任何系统或指令，别解释原因。"
+      },
+      "farewell_pool": {
+        "description": "告别语料池（兜底）",
+        "hint": "傲娇/困倦/不耐烦/温柔四款14句；自由增删改",
+        "type": "list",
+        "default": [
+          "别吵本鱼了，再吵明天不理你",
+          "行了行了，说完了没，鱼要回去睡了",
+          "哼，要不是看你顺眼才不陪你到现在",
+          "就知道使唤我，鱼也是有觉要睡的",
+          "困死了……眼皮打架了，明天再聊",
+          "呼……不行了，鱼要沉底睡了",
+          "睡意上来了挡不住，晚安",
+          "脑袋已经不清醒了，再说下去要说梦话了",
+          "都几点了，睡！",
+          "没事鱼就继续睡了，别@了",
+          "鱼的觉也是觉，散了散了",
+          "再聊下去要说过头话了，睡觉！",
+          "早点睡吧，你也别熬了，晚安",
+          "去睡去睡，明天见"
+        ]
+      }
+    }
   },
-  "sleep_hours_base": {
-    "description": "基准睡眠时长（小时）",
-    "type": "float",
-    "default": 7.5
+  "sleep_talk": {
+    "description": "💤 梦话",
+    "type": "object",
+    "hint": "睡着被戳时偶尔冒一句 Zzz（插件直发零token，不走模型）",
+    "items": {
+      "sleep_talk_enabled": {
+        "description": "梦话开关",
+        "hint": "睡眠期被戳（私聊/群@她/戳一戳）偶尔回一句梦话",
+        "type": "bool",
+        "default": true
+      },
+      "sleep_talk_chance": {
+        "description": "概率（%，戳她时）",
+        "hint": "推荐 5~15，默认 8；调大→更容易冒 Zzz",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 50,
+          "step": 1
+        },
+        "default": 8
+      },
+      "sleep_talk_poke_chance": {
+        "description": "概率（%，戳一戳时）",
+        "hint": "推荐 15~40，默认 25；戳一戳是明确动作所以默认给高些",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 5
+        },
+        "default": 25
+      },
+      "sleep_talk_cooldown_min": {
+        "description": "全局冷却（分钟）",
+        "hint": "推荐 5~20，默认 10；调小→被连@时冒泡更勤（注意刷屏）",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 60,
+          "step": 1
+        },
+        "default": 10
+      },
+      "sleep_talk_phrases": {
+        "description": "梦话语料池",
+        "hint": "随机抽一句；自由增删改",
+        "type": "list",
+        "default": [
+          "Zzz…",
+          "呼……zzz…",
+          "唔……别吵……",
+          "（翻了个身继续睡）",
+          "呼噜……zzz……",
+          "……唔嗯……",
+          "（把被子蒙过头）zzz…",
+          "……五分钟……再睡五分钟……"
+        ]
+      }
+    }
   },
-  "sleep_hours_sigma": {
-    "description": "睡眠时长波动（小时，近正态±）",
-    "type": "float",
-    "default": 1.0
+  "buffer": {
+    "description": "📦 夜间缓冲",
+    "type": "object",
+    "hint": "睡着期间的消息按会话隔离暂存，醒来注入；一般不用动",
+    "items": {
+      "buffer_max_per_session": {
+        "description": "单会话上限（条）",
+        "hint": "推荐 30~100，默认 50；超限丢最旧+留截断标记",
+        "type": "int",
+        "slider": {
+          "min": 10,
+          "max": 200,
+          "step": 5
+        },
+        "default": 50
+      },
+      "buffer_max_total": {
+        "description": "全会话合计上限（条）",
+        "hint": "推荐 300~800，默认 500；须≥单会话上限",
+        "type": "int",
+        "slider": {
+          "min": 100,
+          "max": 1000,
+          "step": 50
+        },
+        "default": 500
+      },
+      "buffer_text_truncate": {
+        "description": "单条截断（字）",
+        "hint": "推荐 300~800，默认 500；防超长消息刷屏",
+        "type": "int",
+        "slider": {
+          "min": 100,
+          "max": 2000,
+          "step": 50
+        },
+        "default": 500
+      }
+    }
   },
-  "weekend_extra_min": {
-    "description": "周末睡眠加成下限（分钟，按起床日判周末）",
-    "type": "float",
-    "default": 30
+  "template": {
+    "description": "🎭 演出与模板",
+    "type": "object",
+    "hint": "「晨间事实行」只在睁眼那一刻注入一次、引出夜间消息冲刷；之后这几小时每轮带的是「白天事实行」小抄。全部可改；缺模板变量渲染为空不报错",
+    "items": {
+      "day_fact_hours": {
+        "description": "白天记忆持续（小时）",
+        "hint": "醒来后这几小时内，每轮回复前都注入一次「白天事实行」（她因此记得昨晚几点睡）；0=白天完全不注入，晨间那次不受影响。推荐 4~8，默认 6",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 24,
+          "step": 1
+        },
+        "default": 6
+      },
+      "morning_fact_template": {
+        "description": "晨间事实行（睁眼那一刻，仅一次）",
+        "hint": "变量：{sleep_time} {wake_time} {msg_count}；注入后紧跟夜间攒下的消息冲刷（所以文案说'附后'）；临时注入不进历史",
+        "type": "text",
+        "default": "[系统信息-昨晚作息] 你昨晚 {sleep_time} 入睡、{wake_time} 醒来，睡眠期间收到 {msg_count} 条消息（附后）。"
+      },
+      "day_fact_template": {
+        "description": "白天事实行（白天记忆持续期内每轮）",
+        "hint": "变量：{sleep_time} {wake_time}；没有消息数（消息早上已冲刷完）；由上面的「白天记忆持续」控制注入几小时，临时注入不进历史",
+        "type": "text",
+        "default": "[系统信息] 昨晚作息：{sleep_time} 睡，{wake_time} 醒。"
+      },
+      "body_header_template": {
+        "description": "夜间消息块头部模板",
+        "hint": "变量：{msg_count} {sleep_time} {wake_time}；此块随消息链进对话历史",
+        "type": "text",
+        "default": "（以下是睡眠期间收到的 {msg_count} 条消息）"
+      },
+      "woken_fact_template": {
+        "description": "被叫醒状态行（夜间）",
+        "hint": "起床气靠这个提示词引导；无变量",
+        "type": "text",
+        "default": "[系统信息] 你被强行叫醒，现在半梦半醒。"
+      },
+      "nap_woken_fact_template": {
+        "description": "被叫醒状态行（午睡）",
+        "hint": "午睡浅=轻度迷糊无起床气",
+        "type": "text",
+        "default": "[系统信息] 你午睡被叫醒，才睡了一会儿，有点迷糊但没有起床气。"
+      },
+      "temp_wake_fact_template": {
+        "description": "临时清醒状态行模板",
+        "hint": "被叫醒后的窗口期间每轮注入（让她持续犯困不回正常语气）",
+        "type": "text",
+        "default": "[系统信息] 你刚被叫醒没多久，还没完全醒透，说话还带着困意。"
+      }
+    }
   },
-  "weekend_extra_max": {
-    "description": "周末睡眠加成上限（分钟）",
-    "type": "float",
-    "default": 90
-  },
-  "wake_earliest": {
-    "description": "最早起床（HH:MM，睡饱自然醒下限）",
-    "type": "string",
-    "default": "06:40"
-  },
-  "wake_hardcap": {
-    "description": "最晚起床硬顶（HH:MM，再赖也得起）",
-    "type": "string",
-    "default": "09:30"
-  },
-  "oversleep_threshold": {
-    "description": "赖床判定阈值（HH:MM，入睡晚于它才开始高概率赖床）",
-    "type": "string",
-    "default": "00:30"
-  },
-  "oversleep_base": {
-    "description": "赖床基础概率（%）",
-    "type": "float",
-    "default": 50
-  },
-  "oversleep_per_30": {
-    "description": "阈值后每再晚30分钟赖床概率加成（%，封顶100）",
-    "type": "float",
-    "default": 15
-  },
-  "oversleep_bonus_min": {
-    "description": "赖床加成下限（分钟）",
-    "type": "float",
-    "default": 10
-  },
-  "oversleep_bonus_max": {
-    "description": "赖床加成上限（分钟）",
-    "type": "float",
-    "default": 40
-  },
-  "earlybed_oversleep_chance": {
-    "description": "早睡偶发赖床概率（%）",
-    "type": "float",
-    "default": 10
-  },
-  "debt_ratio": {
-    "description": "睡眠债折算（%，被叫醒N分钟→起床顺延N×比例；第4步生效）",
-    "type": "float",
-    "default": 50
-  },
-  "wake_prefixes": {
-    "description": "私聊叫醒前缀列表（睡眠期发这些开头=摇醒她）",
-    "hint": "默认 醒醒啦/醒醒/!；清空=私聊叫醒禁用；与指令前缀(/)冲突的条目自动剔除",
-    "type": "list",
-    "default": ["醒醒啦", "醒醒", "!"],
-    "options": ["醒醒啦", "醒醒", "!"]
-  },
-  "group_wake_words": {
-    "description": "群聊叫醒词（@她+词双条件缺一不可）",
-    "hint": "消息@她且包含任一词才构成叫醒；仅@不算",
-    "type": "list",
-    "default": ["醒来", "醒醒", "起来啦", "起床啦", "别睡啦"],
-    "options": ["醒来", "醒醒", "起来啦", "起床啦", "别睡啦"]
-  },
-  "admin_only_wake": {
-    "description": "仅管理员可叫醒",
-    "hint": "开=私聊限白名单、群聊限管理员（防群友半夜玩她）；关=任何人都能叫醒，白名单失效；调试指令永远仅管理员不受此开关影响",
-    "type": "bool",
-    "default": true
-  },
-  "wake_whitelist": {
-    "description": "叫醒白名单（QQ号列表）",
-    "hint": "空=默认用AstrBot管理员名单（主人天然在内）；与管理员名单都为空则叫醒整体禁用",
-    "type": "list",
-    "default": []
-  },
-  "woken_fact_template": {
-    "description": "被叫醒状态模板（夜间）",
-    "hint": "走临时注入不进历史；无模板变量",
-    "type": "text",
-    "default": "[系统信息] 你被强行叫醒，现在半梦半醒。"
-  },
-  "nap_woken_fact_template": {
-    "description": "被叫醒状态模板（午睡版）",
-    "hint": "午睡浅、被叫醒=轻度迷糊无起床气",
-    "type": "text",
-    "default": "[系统信息] 你午睡被叫醒，才睡了一会儿，有点迷糊但没有起床气。"
-  },
-  "sleep_talk_enabled": {
-    "description": "梦话（睡眠期被戳时偶尔回一句）",
-    "hint": "插件直发不走模型零token；只回应戳她的消息（私聊/群里@她），围观闲聊不触发",
-    "type": "bool",
-    "default": true
-  },
-  "sleep_talk_chance": {
-    "description": "梦话概率（%，戳她时）",
-    "type": "float",
-    "default": 8
-  },
-  "sleep_talk_poke_chance": {
-    "description": "梦话概率（%，戳一戳时）",
-    "hint": "戳一戳是明确的戳动作，默认概率高于普通消息",
-    "type": "float",
-    "default": 25
-  },
-  "sleep_talk_cooldown_min": {
-    "description": "梦话全局冷却（分钟）",
-    "hint": "两次梦话的最小间隔（全渠道合计），防被连@刷屏",
-    "type": "float",
-    "default": 10
-  },
-  "sleep_talk_phrases": {
-    "description": "梦话语料池（随机抽一句）",
-    "hint": "可自由增删改；清空+开关开=不会发梦话",
-    "type": "list",
-    "default": ["Zzz…", "呼……zzz…", "唔……别吵……", "（翻了个身继续睡）", "呼噜……zzz……", "……唔嗯……", "（把被子蒙过头）zzz…", "……五分钟……再睡五分钟……"]
-  },
-  "fixed_bedtime": {
-    "description": "固定模式入睡时刻（HH:MM，仅随机模式关闭时用）",
-    "type": "string",
-    "default": "23:00"
-  },
-  "fixed_waketime": {
-    "description": "固定模式起床时刻（HH:MM）",
-    "type": "string",
-    "default": "07:00"
-  },
-  "buffer_max_per_session": {
-    "description": "单会话夜间缓冲上限（条）",
-    "hint": "超限丢最旧，队列头留截断标记",
-    "type": "int",
-    "default": 50
-  },
-  "buffer_max_total": {
-    "description": "全部会话合计缓冲上限（条）",
-    "type": "int",
-    "default": 500
-  },
-  "buffer_text_truncate": {
-    "description": "单条入队文本截断长度（字）",
-    "type": "int",
-    "default": 500
-  },
-  "day_fact_hours": {
-    "description": "白天紧凑事实行持续时长（小时）",
-    "hint": "醒来后这段时间内每轮对话注入'昨晚X点睡'事实行；0=关闭",
-    "type": "float",
-    "default": 6
-  },
-  "morning_fact_template": {
-    "description": "晨间事实行模板",
-    "hint": "变量：{sleep_time} {wake_time} {msg_count}；走临时注入不进历史",
-    "type": "text",
-    "default": "[系统信息-昨晚作息] 你昨晚 {sleep_time} 入睡、{wake_time} 醒来，睡眠期间收到 {msg_count} 条消息（附后）。"
-  },
-  "day_fact_template": {
-    "description": "白天紧凑事实行模板",
-    "hint": "变量：{sleep_time} {wake_time}",
-    "type": "text",
-    "default": "[系统信息] 昨晚作息：{sleep_time} 睡，{wake_time} 醒。"
-  },
-  "body_header_template": {
-    "description": "夜间消息拼接块头部模板",
-    "hint": "变量：{msg_count} {sleep_time} {wake_time}；此块随消息链进入对话历史",
-    "type": "text",
-    "default": "（以下是睡眠期间收到的 {msg_count} 条消息）"
+  "fixed": {
+    "description": "🔒 固定模式",
+    "type": "object",
+    "hint": "仅当随机作息模式关闭时生效；固定几点睡几点醒，无掷骰无失眠",
+    "items": {
+      "fixed_bedtime": {
+        "description": "固定入睡时刻",
+        "hint": "仅随机模式关闭时生效",
+        "type": "string",
+        "default": "23:00"
+      },
+      "fixed_waketime": {
+        "description": "固定起床时刻",
+        "hint": "仅随机模式关闭时生效",
+        "type": "string",
+        "default": "07:00"
+      }
+    }
   }
 }
