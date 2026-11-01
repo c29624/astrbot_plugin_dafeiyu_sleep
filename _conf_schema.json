@@ -456,6 +456,70 @@
       }
     }
   },
+  "nap": {
+    "description": "😴 午睡补偿与没睡醒",
+    "type": "object",
+    "hint": "熬夜次日（失眠或入睡晚于赖床阈值）的彩蛋：白天带'没睡醒'状态蔫着，午后概率眯 15~30 分钟（守门/缓冲/叫醒全照夜间那套）",
+    "items": {
+      "nap_enabled": {
+        "description": "午睡补偿开关",
+        "hint": "关=熬夜次日不午睡、也不注入没睡醒状态",
+        "type": "bool",
+        "default": true
+      },
+      "nap_chance": {
+        "description": "午睡触发概率（%）",
+        "hint": "熬夜次日在午睡窗口内随机时刻掷骰，掷中才眯。推荐 30~60，默认 40；没睡醒状态不受此概率影响（熬夜必蔫）",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 5
+        },
+        "default": 40
+      },
+      "nap_window_start": {
+        "description": "午睡窗口起",
+        "hint": "随机入睡时刻的下界，默认 13:00；须早于窗口止",
+        "type": "string",
+        "default": "13:00"
+      },
+      "nap_window_end": {
+        "description": "午睡窗口止",
+        "hint": "随机入睡时刻的上界，默认 15:00",
+        "type": "string",
+        "default": "15:00"
+      },
+      "nap_duration_min": {
+        "description": "午睡时长下限（分钟）",
+        "hint": "眯多久在此区间随机抽；推荐 10~20，默认 15",
+        "type": "float",
+        "slider": {
+          "min": 5,
+          "max": 60,
+          "step": 5
+        },
+        "default": 15
+      },
+      "nap_duration_max": {
+        "description": "午睡时长上限（分钟）",
+        "hint": "推荐 20~45，默认 30；调大→午后消失更久",
+        "type": "float",
+        "slider": {
+          "min": 10,
+          "max": 90,
+          "step": 5
+        },
+        "default": 30
+      },
+      "drowsy_fact_template": {
+        "description": "没睡醒状态行模板",
+        "hint": "熬夜次日白天每轮注入（临时注入不进历史）：抽中午睡=蔫到午睡结束，没抽中=蔫到 17:00；说话更蔫句子更短靠人设发挥",
+        "type": "text",
+        "default": "[系统信息] 你昨晚熬夜了，今天没睡醒。"
+      }
+    }
+  },
   "buffer": {
     "description": "📦 夜间缓冲",
     "type": "object",

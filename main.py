@@ -73,7 +73,7 @@ except ImportError:
     At, Plain = None, None
 
 PLUGIN_NAME = "astrbot_plugin_dafeiyu_sleep"
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.5.0"
 STATE_FILE = "sleep_state.json"
 
 PHASE_AWAKE = "awake"
@@ -138,6 +138,13 @@ DEFAULTS = {
     "quick_latest_wake": "09:30",
     "quick_oversleep_max_chance": 70.0,
     "quick_oversleep_max_min": 40.0,
+    "nap_enabled": True,
+    "nap_chance": 40.0,
+    "nap_window_start": "13:00",
+    "nap_window_end": "15:00",
+    "nap_duration_min": 15.0,
+    "nap_duration_max": 30.0,
+    "drowsy_fact_template": "[系统信息] 你昨晚熬夜了，今天没睡醒。",
     "nicknames": ["大肥鱼", "肥鱼", "小鲸鱼"],
     "temp_wake_fact_template": "[系统信息] 你刚被叫醒没多久，还没完全醒透，说话还带着困意。",
     "farewell_llm_enabled": True,
@@ -227,6 +234,8 @@ class DafeiyuSleepPlugin(Star):
         self._is_nap = False  # 当前睡眠窗口是否午睡（叫醒演出区分用）
         self._last_sleep_talk = 0.0  # 上次说梦话的时刻（全局冷却）
         self._temp_wake = None  # 临时清醒 {start_ts, source_umo, last_activity}
+        self._nap_plan = None  # 午睡补偿计划 {at_ts, end_ts}（熬夜次日的午后彩蛋）
+        self._drowsy_until = 0.0  # "没睡醒"状态行注入截止时刻
         self._lock = asyncio.Lock()
         self._tick_task = None
         self._data_dir = None
@@ -430,6 +439,9 @@ class DafeiyuSleepPlugin(Star):
         self.tpl_nap_woken = str(
             cfg.get("nap_woken_fact_template", DEFAULTS["nap_woken_fact_template"])
         )
+        self.tpl_drowsy = str(
+            cfg.get("drowsy_fact_template", DEFAULTS["drowsy_fact_template"])
+        )
 
         raw_pfx = cfg.get("wake_prefixes", DEFAULTS["wake_prefixes"])
         if not isinstance(raw_pfx, list):
@@ -482,6 +494,24 @@ class DafeiyuSleepPlugin(Star):
         self.c_tw_min = num("temp_wake_min_minutes", 1, 480)
         self.c_tw_max = num("temp_wake_max_minutes", 1, 720)
         self.c_cold = num("cold_field_minutes", 1, 120)
+
+        # ---- 午睡补偿 + 没睡醒（第5步：熬夜次日的午后彩蛋） ----
+        self.c_nap_on = bool(get("nap_enabled"))
+        self.c_nap_chance = num("nap_chance", 0, 100)
+        nv_lo = _parse_hhmm(get("nap_window_start"))
+        nv_hi = _parse_hhmm(get("nap_window_end"))
+        if nv_lo is None or nv_hi is None or nv_lo >= nv_hi:
+            logger.warning("[睡觉] 配置矛盾：午睡窗口起止非法或次序颠倒，回落默认 13:00~15:00")
+            nv_lo = _parse_hhmm(DEFAULTS["nap_window_start"])
+            nv_hi = _parse_hhmm(DEFAULTS["nap_window_end"])
+        self.c_nap_lo = dtime(nv_lo // 60, nv_lo % 60)
+        self.c_nap_hi = dtime(nv_hi // 60, nv_hi % 60)
+        self.c_nap_dur_min = num("nap_duration_min", 5, 120)
+        self.c_nap_dur_max = num("nap_duration_max", 5, 180)
+        if self.c_nap_dur_min > self.c_nap_dur_max:
+            logger.warning("[睡觉] 配置矛盾：午睡时长下限 > 上限，双方回落默认")
+            self.c_nap_dur_min = DEFAULTS["nap_duration_min"]
+            self.c_nap_dur_max = DEFAULTS["nap_duration_max"]
         if self.c_tw_min > self.c_tw_max:
             logger.warning(
                 f"[睡觉] 配置矛盾：最短清醒({self.c_tw_min}) > 最长上限({self.c_tw_max})，双方回落默认"
@@ -565,6 +595,8 @@ class DafeiyuSleepPlugin(Star):
             self._debt_minutes = float(data.get("debt_minutes", 0))
             self._is_nap = bool(data.get("is_nap", False))
             self._temp_wake = data.get("temp_wake")
+            self._nap_plan = data.get("nap_plan")
+            self._drowsy_until = float(data.get("drowsy_until", 0) or 0)
         except Exception:
             logger.warning("[睡觉] 状态文件损坏，按全新状态启动（缓冲可能丢失）")
 
@@ -584,6 +616,8 @@ class DafeiyuSleepPlugin(Star):
                 "debt_minutes": self._debt_minutes,
                 "is_nap": self._is_nap,
                 "temp_wake": self._temp_wake,
+                "nap_plan": self._nap_plan,
+                "drowsy_until": self._drowsy_until,
                 "saved_at": time.time(),
             }
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -651,6 +685,7 @@ class DafeiyuSleepPlugin(Star):
             "dur_min": round(dur, 1),
             "weekend_extra": round(wk_extra, 1),
             "oversleep": hit,
+            "late_bed": offset > self.c_thr,  # 午睡补偿资格：入睡晚于赖床阈值
             "bonus_min": round(bonus, 1),
             "debt_extra": round(debt_extra, 1),
         }
@@ -683,6 +718,15 @@ class DafeiyuSleepPlugin(Star):
         wake_dt = bed_dt + timedelta(
             minutes=rec["dur_min"] + rec["weekend_extra"] + rec["bonus_min"] + rec["debt_extra"]
         )
+        natural = wake_dt
+        wake_dt = min(max(wake_dt, lo), hi)
+        # 收口抖动（消整点机械感）：撞最早起床地板 +0~10 分钟、顶最晚起床硬顶 −5~0 分钟，
+        # 抖完再夹一次保证"不早于地板、不晚于硬顶"的承诺不被极窄窗破坏
+        if wake_dt > natural:
+            wake_dt += timedelta(minutes=random.uniform(0, 10))
+        elif wake_dt < natural:
+            wake_dt += timedelta(minutes=random.uniform(-5, 0))
+        wake_dt = min(max(wake_dt, lo), hi)
         rec.update(
             anchor=anchor_date.isoformat(),
             bed_ts=bed_dt.timestamp(),
@@ -802,6 +846,15 @@ class DafeiyuSleepPlugin(Star):
                     bed, wake = self._natural_window(now_dt)
                     if bed.timestamp() <= now < wake.timestamp():
                         await self._enter_sleep(bed.timestamp(), wake.timestamp())
+                if self._nap_plan and self.phase == PHASE_AWAKE:
+                    if now >= self._nap_plan["end_ts"] + 600:  # 窗口彻底错过（重载/强制状态）→ 作废
+                        self._nap_plan = None
+                        self._save_state()
+                    elif now >= self._nap_plan["at_ts"]:
+                        plan, self._nap_plan = self._nap_plan, None
+                        await self._enter_sleep(
+                            plan["at_ts"], plan["end_ts"], note="（午睡补偿）", nap=True
+                        )
 
     async def _enter_sleep(self, bed_ts, wake_ts, note="", nap=False):
         self.phase = PHASE_SLEEPING
@@ -834,6 +887,31 @@ class DafeiyuSleepPlugin(Star):
             self._last_night["wake_actual_ts"] = actual_ts
         self._debt_minutes = 0.0  # 债随夜结算清零
         self._roll_tonight(datetime.fromtimestamp(actual_ts) if actual_ts else datetime.now())
+        self._decide_nap(actual_ts or time.time())
+
+    def _decide_nap(self, wake_ts):
+        """第5步午睡补偿：熬夜（失眠或入睡晚于阈值）次日 13:00~15:00 概率午睡；
+        白天注入"没睡醒"状态行——抽中午睡则蔫到午睡结束，没抽中蔫到 17:00"""
+        self._nap_plan = None
+        self._drowsy_until = 0.0
+        ln = self._last_night
+        if not self.c_nap_on or not ln:
+            return
+        if not (ln.get("insomnia") or ln.get("late_bed")):
+            return
+        day = datetime.fromtimestamp(wake_ts).date()
+        lo = datetime.combine(day, self.c_nap_lo).timestamp()
+        hi = datetime.combine(day, self.c_nap_hi).timestamp()
+        drowsy_end = datetime.combine(day, dtime(17, 0)).timestamp()
+        if random.random() * 100 < self.c_nap_chance:
+            at = random.uniform(max(lo, wake_ts), hi)
+            dur = random.uniform(self.c_nap_dur_min, self.c_nap_dur_max) * 60
+            self._nap_plan = {"at_ts": at, "end_ts": at + dur}
+            drowsy_end = self._nap_plan["end_ts"]
+            logger.info(
+                f"[睡觉] 熬夜次日午睡计划：{_fmt_hm(at)} 眯 {dur / 60:.0f} 分钟（没睡醒状态生效至午睡结束）"
+            )
+        self._drowsy_until = drowsy_end
 
     def _end_nap(self, now=None, note="自然醒"):
         """午睡结束：只恢复清醒，不归档、不重抽今晚作息；清掉窗口防白天事实行误报"""
@@ -841,6 +919,7 @@ class DafeiyuSleepPlugin(Star):
         self._set_morning_pending(now)
         self.phase = PHASE_AWAKE
         self._wake_at = now
+        self._drowsy_until = 0.0  # 睡过了，困意解除
         self._is_nap = False
         self._sleep_window = None
         self._save_state()
@@ -1225,6 +1304,9 @@ class DafeiyuSleepPlugin(Star):
             # 临时清醒期间每轮带"还没醒透"状态行（持续困意）
             if self.phase == PHASE_TEMP_WAKE:
                 parts.append(self.tpl_temp_wake_fact)
+            # 熬夜次日的"没睡醒"状态行（清醒期、未到截止；午睡结束即解除）
+            if self.phase == PHASE_AWAKE and time.time() < self._drowsy_until:
+                parts.append(self.tpl_drowsy)
             if (
                 self._wake_at
                 and self.day_fact_hours > 0
@@ -1310,7 +1392,15 @@ class DafeiyuSleepPlugin(Star):
                 f"固定作息：{self.bed_min // 60:02d}:{self.bed_min % 60:02d} 睡 → "
                 f"{self.wake_min // 60:02d}:{self.wake_min % 60:02d} 醒"
             )
-            yield event.plain_result(f"状态：清醒\n{sched}\n{self._wake_line()}")
+            nap = ""
+            if self._nap_plan:
+                nap = (
+                    f"午睡计划：{_fmt_hm(self._nap_plan['at_ts'])} 眯 "
+                    f"{int((self._nap_plan['end_ts'] - self._nap_plan['at_ts']) / 60)} 分钟\n"
+                )
+            elif time.time() < self._drowsy_until:
+                nap = "没睡醒状态生效中（蔫到 17:00 或午睡结束）\n"
+            yield event.plain_result(f"状态：清醒\n{sched}\n{nap}{self._wake_line()}")
 
     @filter.command("强制入睡")
     async def cmd_force_sleep(self, event: AstrMessageEvent, args=None):
