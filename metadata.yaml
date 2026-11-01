@@ -2,7 +2,7 @@ name: astrbot_plugin_dafeiyu_sleep
 display_name: 随机睡觉
 desc: 让 bot 拥有真实作息——到点真睡：每晚随机抽签入睡/起床时刻，睡眠期全渠道静默（消息进缓冲零token、被戳有概率说梦话），早上真醒：知道昨晚几点睡的、翻过夜里谁说了什么（晨间冲刷注入）。带叫醒频道（@+唤醒词半梦半醒聊几句再自动睡回）、临时清醒智能回睡、睡眠债顺延、失眠/赖床/没睡醒/午睡补偿、休息日体系（单休/双休/大小周+法定节假日chinese-calendar）、固定模式上班族抖动、/作息分布模拟指令、LLM闸门防必回后门。
 short_desc: 随机作息真睡觉：睡眠期全渠道静默+缓冲，早上翻夜间消息；作息可单休双休大小周
-version: 0.7.1
+version: 0.7.2
 author: "c29624"
 repo: https://github.com/c29624/astrbot_plugin_dafeiyu_sleep
 tags:

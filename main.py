@@ -90,7 +90,7 @@ except ImportError:
     At, Json, Plain = None, None, None
 
 PLUGIN_NAME = "astrbot_plugin_dafeiyu_sleep"
-PLUGIN_VERSION = "0.7.1"
+PLUGIN_VERSION = "0.7.2"
 STATE_FILE = "sleep_state.json"
 
 PHASE_AWAKE = "awake"
@@ -280,6 +280,7 @@ class DafeiyuSleepPlugin(Star):
         self._buffers = {}  # umo -> [entry dict]
         self._truncated = set()
         self._morning_pending = {}  # umo -> {sleep_time, wake_time, msg_count}（运行时）
+        self._morning_flushed = {}  # {"date": "YYYY-MM-DD", "umos": [...]} 晨间冲刷已发生标记（主动私聊插件据此让位晨起，v0.7.2）
         self._wake_at = None
         self._night = None  # 今日/今夜抽签记录（dict，见 _roll_tonight）
         self._last_night = None  # 上一夜完成记录（失眠标记留给第5步）
@@ -716,6 +717,7 @@ class DafeiyuSleepPlugin(Star):
             self._nap_plan = data.get("nap_plan")
             self._drowsy_until = float(data.get("drowsy_until", 0) or 0)
             self._fixed_jit = data.get("fixed_jit")
+            self._morning_flushed = data.get("morning_flushed") or {}
         except Exception:
             logger.warning("[睡觉] 状态文件损坏，按全新状态启动（缓冲可能丢失）")
 
@@ -738,6 +740,7 @@ class DafeiyuSleepPlugin(Star):
                 "nap_plan": self._nap_plan,
                 "drowsy_until": self._drowsy_until,
                 "fixed_jit": self._fixed_jit,
+                "morning_flushed": self._morning_flushed,
                 "saved_at": time.time(),
             }
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -1558,6 +1561,15 @@ class DafeiyuSleepPlugin(Star):
         if info:
             self._morning_pending[umo + "#fact"] = info
         logger.info(f"[睡觉] 晨间冲刷：{umo} 注入 {len(buf)} 条夜间消息")
+        # 冲刷标记（v0.7.2）：主动私聊插件读这个让位晨起，不再在冲刷对话之后补发早安
+        today = datetime.now().date().isoformat()
+        mf = self._morning_flushed
+        if not isinstance(mf, dict) or mf.get("date") != today:
+            mf = {"date": today, "umos": []}
+            self._morning_flushed = mf
+        if umo not in mf["umos"]:
+            mf["umos"].append(umo)
+        self._save_state()
 
     # ---------- extra 注入（事实行，mark_as_temp 不入历史） ----------
 
