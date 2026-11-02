@@ -57,6 +57,11 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
 
+try:  # 法定节假日数据（缺包/年底过期自动降级纯星期判定）
+    import chinese_calendar as _cc
+except Exception:
+    _cc = None
+
 try:
     from astrbot.api.star import StarTools
 except ImportError:  # 旧版无 StarTools
@@ -73,7 +78,7 @@ except ImportError:
     At, Plain = None, None
 
 PLUGIN_NAME = "astrbot_plugin_dafeiyu_sleep"
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.6.0"
 STATE_FILE = "sleep_state.json"
 
 PHASE_AWAKE = "awake"
@@ -145,6 +150,27 @@ DEFAULTS = {
     "nap_duration_min": 15.0,
     "nap_duration_max": 30.0,
     "drowsy_fact_template": "[系统信息] 你昨晚熬夜了，今天没睡醒。",
+    "rest_independent": False,
+    "rest_schedule_type": 2,
+    "rest_single_weekday": "周日",
+    "rest_alt_parity": "双周休周六",
+    "rest_holiday_follow": True,
+    "rest_extra_work_dates": [],
+    "rest_extra_rest_dates": [],
+    "rest_bed_earliest": "",
+    "rest_bed_latest": "",
+    "rest_wake_earliest": "",
+    "rest_wake_hardcap": "",
+    "fixed_bed_jitter_max": 20.0,
+    "fixed_wake_jitter_max": 15.0,
+    "perf_guide_template": (
+        "[系统信息-表演指引] 关于你刚睡醒，按你自己的性格和语气自然处理，以下几点供参考："
+        "不必逐条回应夜里收到的消息，像正常人翻手机，只挑有意思的接；"
+        "不必主动汇报作息，被问起才说，十次里提两三次就好；"
+        "如果夜里有人深夜倾诉情绪，优先关心那条；"
+        "没睡醒的日子说话更蔫、句子更短、容易走神；"
+        "午睡醒来被问就说刚才眯着了，不用系统式解释。"
+    ),
     "nicknames": ["大肥鱼", "肥鱼", "小鲸鱼"],
     "temp_wake_fact_template": "[系统信息] 你刚被叫醒没多久，还没完全醒透，说话还带着困意。",
     "farewell_llm_enabled": True,
@@ -236,6 +262,8 @@ class DafeiyuSleepPlugin(Star):
         self._temp_wake = None  # 临时清醒 {start_ts, source_umo, last_activity}
         self._nap_plan = None  # 午睡补偿计划 {at_ts, end_ts}（熬夜次日的午后彩蛋）
         self._drowsy_until = 0.0  # "没睡醒"状态行注入截止时刻
+        self._fixed_jit = None  # 固定模式当日抖动 {day, bed, wake}（防重抽）
+        self._cc_dead_years = set()  # chinese-calendar 不覆盖的年份（降级标记）
         self._lock = asyncio.Lock()
         self._tick_task = None
         self._data_dir = None
@@ -512,6 +540,49 @@ class DafeiyuSleepPlugin(Star):
             logger.warning("[睡觉] 配置矛盾：午睡时长下限 > 上限，双方回落默认")
             self.c_nap_dur_min = DEFAULTS["nap_duration_min"]
             self.c_nap_dur_max = DEFAULTS["nap_duration_max"]
+
+        # ---- 休息日体系（第6步：周末≠休息日，大小周/单休/调休） ----
+        self.rest_independent = bool(get("rest_independent"))
+        self.c_rest_type = num("rest_schedule_type", 1, 3, int)
+        self.c_single_wd = 5 if "六" in str(get("rest_single_weekday")) else 6
+        self.c_alt_even_rest = "双" in str(get("rest_alt_parity"))
+        self.c_holiday_follow = bool(get("rest_holiday_follow"))
+
+        def _date_set(v):
+            if not isinstance(v, list):
+                return set()
+            out = set()
+            for x in v:
+                s = str(x).strip()
+                try:
+                    datetime.strptime(s, "%Y-%m-%d")
+                    out.add(s)
+                except ValueError:
+                    continue
+            return out
+
+        self._rest_work_dates = _date_set(get("rest_extra_work_dates"))
+        self._rest_dates = _date_set(get("rest_extra_rest_dates"))
+
+        rb, rl = _parse_hhmm(get("rest_bed_earliest")), _parse_hhmm(get("rest_bed_latest"))
+        if rb is None or rl is None or rb >= rl:
+            if rb is not None or rl is not None:
+                logger.warning("[睡觉] 休息日入睡窗非法或次序颠倒，回落自动（工作日窗+熬夜偏移）")
+            self.c_rest_bed = None
+        else:
+            self.c_rest_bed = (rb, rl)
+        rwl, rwh = _parse_hhmm(get("rest_wake_earliest")), _parse_hhmm(get("rest_wake_hardcap"))
+        if rwl is None or rwh is None or rwl >= rwh:
+            if rwl is not None or rwh is not None:
+                logger.warning("[睡觉] 休息日起床窗非法或次序颠倒，回落自动（工作日窗+赖床加成）")
+            self.c_rest_wake = None
+        else:
+            self.c_rest_wake = (rwl, rwh)
+
+        # 固定模式 2.0：上班族式双端小抖动
+        self.c_fix_bed_jit = num("fixed_bed_jitter_max", 0, 60)
+        self.c_fix_wake_jit = num("fixed_wake_jitter_max", 0, 60)
+        self.tpl_perf_guide = str(cfg.get("perf_guide_template", DEFAULTS["perf_guide_template"]))
         if self.c_tw_min > self.c_tw_max:
             logger.warning(
                 f"[睡觉] 配置矛盾：最短清醒({self.c_tw_min}) > 最长上限({self.c_tw_max})，双方回落默认"
@@ -597,6 +668,7 @@ class DafeiyuSleepPlugin(Star):
             self._temp_wake = data.get("temp_wake")
             self._nap_plan = data.get("nap_plan")
             self._drowsy_until = float(data.get("drowsy_until", 0) or 0)
+            self._fixed_jit = data.get("fixed_jit")
         except Exception:
             logger.warning("[睡觉] 状态文件损坏，按全新状态启动（缓冲可能丢失）")
 
@@ -618,6 +690,7 @@ class DafeiyuSleepPlugin(Star):
                 "temp_wake": self._temp_wake,
                 "nap_plan": self._nap_plan,
                 "drowsy_until": self._drowsy_until,
+                "fixed_jit": self._fixed_jit,
                 "saved_at": time.time(),
             }
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -649,31 +722,70 @@ class DafeiyuSleepPlugin(Star):
 
     # ---------- 随机作息生成器（设计文档第三节） ----------
 
-    def _anchor_base_dt(self, anchor_date):
+    def _anchor_base_dt(self, anchor_date, base_min=None):
         """某夜的基准入睡时刻。基准在凌晨（00:00~11:59，如 00:00）时进位到锚日
         的次日——"10-29 晚上的那觉"的 00:00 是 10-30 00:00，不是 10-29 00:00。"""
-        base = self.c_base
+        base = int(self.c_base if base_min is None else base_min)
         day = anchor_date + timedelta(days=1) if base < 12 * 60 else anchor_date
         return datetime.combine(day, dtime(base // 60, base % 60))
 
-    def _derive_wake(self, anchor_dt, bed_dt, insomnia):
-        """最终起床 = clamp(入睡 + 抽样时长 + 周末加成 + 睡眠债 + 赖床加成, 最早起床, 硬顶)"""
+    def _holiday_rest(self, d):
+        """chinese-calendar 判定（含调休补班）；包缺失/年份过期返回 None 走常规判定"""
+        if _cc is None:
+            return None
+        if d.year in self._cc_dead_years:
+            return None
+        try:
+            return not _cc.is_workday(d)
+        except Exception:
+            self._cc_dead_years.add(d.year)
+            logger.warning(f"[睡觉] chinese-calendar 不覆盖 {d.year} 年（包过期？），节假日判定降级纯星期规则")
+            return None
+
+    def _is_rest_day(self, d):
+        """五层短路：补工作日 > 补休息日 > 法定节假日 > 调休补班 > 常规周"""
+        iso = d.isoformat()
+        if iso in self._rest_work_dates:
+            return False
+        if iso in self._rest_dates:
+            return True
+        if self.c_holiday_follow:
+            r = self._holiday_rest(d)
+            if r is not None:
+                return r
+        wd = d.weekday()
+        if self.c_rest_type == 1:
+            return wd == self.c_single_wd
+        if self.c_rest_type == 3:
+            if wd == 6:
+                return True
+            if wd == 5:
+                return (d.isocalendar()[1] % 2 == 0) == self.c_alt_even_rest
+            return False
+        return wd >= 5
+
+    def _rest_night(self, wake_day):
+        """这夜的醒来日是否休息日（独立作息开启且随机模式才分叉）"""
+        return self.rest_independent and self.schedule_random and self._is_rest_day(wake_day)
+
+    def _derive_wake(self, anchor_dt, bed_dt, insomnia, thr=None, rest=False):
+        """最终起床 = clamp(入睡 + 抽样时长 + 休息日加成 + 睡眠债 + 赖床加成, 最早起床, 硬顶)"""
+        thr = self.c_thr if thr is None else thr
         dur = random.gauss(self.c_hours_base * 60, self.c_hours_sigma * 60)
         dur = max(self.c_hours_base * 60 - 2 * self.c_hours_sigma * 60,
                   min(self.c_hours_base * 60 + 2 * self.c_hours_sigma * 60, dur))
-        # 周末判定按起床日：基准+12h 的日期=醒来的那个上午（晚基准23:00→次日、凌晨基准00:00→当天）
+        # 休息日判定按起床日：基准+12h 的日期=醒来的那个上午（晚基准23:00→次日、凌晨基准00:00→当天）
         wake_day = (anchor_dt + timedelta(hours=12)).date()
-        weekend = wake_day.weekday() >= 5
-        wk_extra = random.uniform(self.c_wk_min, self.c_wk_max) if weekend else 0.0
+        wk_extra = random.uniform(self.c_wk_min, self.c_wk_max) if rest else 0.0
 
         # 赖床掷骰
         offset = (bed_dt - anchor_dt).total_seconds() / 60.0  # 相对基准的偏移分钟
         if insomnia:
             hit = True  # 失眠必赖床
-        elif offset > self.c_thr:
+        elif offset > thr:
             p = min(
                 100.0,
-                self.c_os_base + self.c_os_per30 * int((offset - self.c_thr) // self.c_os_step),
+                self.c_os_base + self.c_os_per30 * int((offset - thr) // self.c_os_step),
             )
             hit = random.random() * 100 < p
         else:
@@ -685,7 +797,7 @@ class DafeiyuSleepPlugin(Star):
             "dur_min": round(dur, 1),
             "weekend_extra": round(wk_extra, 1),
             "oversleep": hit,
-            "late_bed": offset > self.c_thr,  # 午睡补偿资格：入睡晚于赖床阈值
+            "late_bed": offset > thr,  # 午睡补偿资格：入睡晚于赖床阈值
             "bonus_min": round(bonus, 1),
             "debt_extra": round(debt_extra, 1),
         }
@@ -694,7 +806,26 @@ class DafeiyuSleepPlugin(Star):
         """抽今晚的作息。force_* 仅供调试指令拨表，走同一套公式。"""
         now_dt = now_dt or datetime.now()
         anchor_date = now_dt.date()
-        base_dt = self._anchor_base_dt(anchor_date)
+
+        # 参数组选择（第6步休息日体系）：独立开启且醒来日为休息日 → 休息日参数组。
+        # 留空窗=自动：入睡窗整体 +30~60 随机熬夜偏移；填了窗=独立窗（基准=最早+窗宽×0.55、阈值=窗末−30）
+        base_min = self.c_base
+        ear, lat, ins_l, thr = self.c_earliest, self.c_latest, self.c_ins_late, self.c_thr
+        bed_sigma = self.c_bed_sigma
+        rest = self._rest_night((self._anchor_base_dt(anchor_date) + timedelta(hours=12)).date())
+        if rest:
+            if self.c_rest_bed:
+                rb, rl = self.c_rest_bed
+                base_min = (rb + int((rl - rb) * 0.55)) % 1440
+                ear, lat = _rel_minutes(rb, base_min), _rel_minutes(rl, base_min)
+                ins_l, thr = lat + 60, lat - 30
+                bed_sigma = max(15.0, (lat - ear) / 4.0)
+            else:
+                shift = random.uniform(30, 60)
+                base_min = (self.c_base + shift) % 1440
+                ear, lat = self.c_earliest + shift, self.c_latest + shift
+                ins_l, thr = self.c_ins_late + shift, self.c_thr + shift
+        base_dt = self._anchor_base_dt(anchor_date, base_min)
 
         if force_insomnia is not None:
             insomnia = bool(force_insomnia)
@@ -703,18 +834,23 @@ class DafeiyuSleepPlugin(Star):
         if force_bed_rel is not None:
             off = float(force_bed_rel)
         elif insomnia:
-            off = random.uniform(self.c_latest, self.c_ins_late)  # 失眠：常规最晚~失眠上限
+            off = random.uniform(lat, ins_l)  # 失眠：常规最晚~失眠上限
         else:
-            off = random.gauss(0, self.c_bed_sigma)
-            off = max(self.c_earliest, min(self.c_latest, off))
+            off = random.gauss(0, bed_sigma)
+            off = max(ear, min(lat, off))
 
         bed_dt = base_dt + timedelta(minutes=off)
-        rec = self._derive_wake(base_dt, bed_dt, insomnia)
-        # 最终起床 = clamp(入睡 + 时长 + 周末 + 赖床 + 债, 最早起床, 硬顶)
-        # 起床边界在"基准+12h 的那个上午"（与 _derive_wake 的周末判定同口径）
+        rec = self._derive_wake(base_dt, bed_dt, insomnia, thr=thr, rest=rest)
+        # 最终起床 = clamp(入睡 + 抽样时长 + 休息日加成 + 睡眠债 + 赖床加成, 最早起床, 硬顶)
+        # 起床边界在"基准+12h 的那个上午"（与 _derive_wake 的休息日判定同口径）；休息日独立窗优先
         wake_day = (base_dt + timedelta(hours=12)).date()
-        lo = datetime.combine(wake_day, self.c_wake_lo)
-        hi = datetime.combine(wake_day, self.c_wake_hi)
+        if rest and self.c_rest_wake:
+            wl, wh = self.c_rest_wake
+            lo = datetime.combine(wake_day, dtime(wl // 60, wl % 60))
+            hi = datetime.combine(wake_day, dtime(wh // 60, wh % 60))
+        else:
+            lo = datetime.combine(wake_day, self.c_wake_lo)
+            hi = datetime.combine(wake_day, self.c_wake_hi)
         wake_dt = bed_dt + timedelta(
             minutes=rec["dur_min"] + rec["weekend_extra"] + rec["bonus_min"] + rec["debt_extra"]
         )
@@ -732,6 +868,7 @@ class DafeiyuSleepPlugin(Star):
             bed_ts=bed_dt.timestamp(),
             wake_ts=min(max(wake_dt, lo), hi).timestamp(),
             insomnia=insomnia,
+            rest=rest,
             source=source,
         )
         self._night = rec
@@ -778,15 +915,33 @@ class DafeiyuSleepPlugin(Star):
         span = (self.wake_min - self.bed_min) % 1440
         return span if span > 0 else 480
 
+    def _fixed_offsets(self, day):
+        """固定模式 2.0：当日入睡/起床小抖动（上班族式毛边），按日落盘防重抽"""
+        rec = self._fixed_jit or {}
+        if rec.get("day") == day.isoformat():
+            return rec.get("bed", 0.0), rec.get("wake", 0.0)
+        rec = {
+            "day": day.isoformat(),
+            "bed": random.uniform(0, self.c_fix_bed_jit),
+            "wake": random.uniform(0, self.c_fix_wake_jit),
+        }
+        self._fixed_jit = rec
+        self._save_state()
+        return rec["bed"], rec["wake"]
+
     def _natural_window(self, now=None):
         now = now or datetime.now()
         bed = now.replace(hour=self.bed_min // 60, minute=self.bed_min % 60, second=0, microsecond=0)
-        wake = bed + timedelta(minutes=self._span_minutes())
+        bo, wo = self._fixed_offsets(bed.date())
+        bed += timedelta(minutes=bo)
+        wake = bed + timedelta(minutes=self._span_minutes() + wo)
         if bed <= now < wake:
             return bed, wake
         if now >= wake:
             bed += timedelta(days=1)
-            wake = bed + timedelta(minutes=self._span_minutes())
+            bo, wo = self._fixed_offsets(bed.date())
+            bed += timedelta(minutes=bo)
+            wake = bed + timedelta(minutes=self._span_minutes() + wo)
         return bed, wake
 
     def _next_wake_after(self, now_dt):
@@ -1301,6 +1456,8 @@ class DafeiyuSleepPlugin(Star):
                     parts.append(self.tpl_nap_woken)
                 elif info.get("woken"):
                     parts.append(self.tpl_woken)
+                # 表演指引（人格无关，随晨间冲刷轮注入，不进历史）
+                parts.append(self.tpl_perf_guide)
             # 临时清醒期间每轮带"还没醒透"状态行（持续困意）
             if self.phase == PHASE_TEMP_WAKE:
                 parts.append(self.tpl_temp_wake_fact)
@@ -1401,6 +1558,68 @@ class DafeiyuSleepPlugin(Star):
             elif time.time() < self._drowsy_until:
                 nap = "没睡醒状态生效中（蔫到 17:00 或午睡结束）\n"
             yield event.plain_result(f"状态：清醒\n{sched}\n{nap}{self._wake_line()}")
+
+    @filter.command("作息分布")
+    async def cmd_dist(self, event: AstrMessageEvent, args=None):
+        """按当前配置模拟 100 晚，出入睡/醒来直方图；参数=休息日 则锚休息日夜"""
+        if not self._is_admin(event):
+            yield event.plain_result("没权限")
+            return
+        want_rest = any(k in str(args or "") for k in ("休", "周末", "末"))
+        async with self._lock:
+            snap = (self._night, self._last_night, self._nap_plan, self._drowsy_until,
+                    self._debt_minutes, self._fixed_jit)
+            _save = self._save_state
+            self._save_state = lambda: None  # 模拟期间禁止落盘
+            try:
+                d = datetime.now().date()
+                anchor = None
+                for _ in range(10):
+                    d += timedelta(days=1)
+                    if self._is_rest_day(d + timedelta(days=1)) == want_rest:
+                        anchor = datetime.combine(d, dtime(23, 0))
+                        break
+                if anchor is None:  # 兜底：找不到就硬锚明天
+                    anchor = datetime.combine(datetime.now().date() + timedelta(days=1), dtime(23, 0))
+                recs = [self._roll_tonight(anchor) for _ in range(100)]
+            finally:
+                self._save_state = _save
+                (self._night, self._last_night, self._nap_plan, self._drowsy_until,
+                 self._debt_minutes, self._fixed_jit) = snap
+
+        def _idx(hm, wrap):
+            h, m = int(hm[:2]), int(hm[3:5])
+            i = (h * 60 + m) // 30
+            return i + 48 if wrap and h < 12 else i
+
+        def _histo(keys, lo, hi, wrap=False):
+            cnt = {}
+            for k in keys:
+                cnt[_idx(k, wrap)] = cnt.get(_idx(k, wrap), 0) + 1
+            mx = max(cnt.values() or [1])
+            lines = []
+            for t in range(lo, hi + 1):
+                tt = t * 30
+                n = cnt.get(t, 0)
+                lines.append(f"  {(tt // 60) % 24:02d}:{tt % 60:02d} |{'█' * round(n * 30 / mx)} {n}")
+            return "\n".join(lines)
+
+        fmt = lambda t: datetime.fromtimestamp(t).strftime("%H:%M")
+        beds = [fmt(r["bed_ts"]) for r in recs]
+        wakes = [fmt(r["wake_ts"]) for r in recs]
+        lo_ts = min(r["wake_ts"] for r in recs)
+        hi_ts = max(r["wake_ts"] for r in recs)
+        ins = sum(r["insomnia"] for r in recs)
+        overs = sum(bool(r["oversleep"]) for r in recs)
+        late = sum(bool(r.get("late_bed")) for r in recs)
+        note = "" if self.rest_independent else "\n（休息日独立未开启：两种模式分布相同）"
+        yield event.plain_result(
+            f"模拟100晚·{'休息日' if want_rest else '工作日'}夜（当前配置）\n"
+            f"入睡：\n{_histo(beds, 46, 55, True)}\n"
+            f"醒来：\n{_histo(wakes, _idx(fmt(lo_ts), False), _idx(fmt(hi_ts), False))}\n"
+            f"失眠{ins}% 赖床{overs}% 熬夜资格{late}%\n"
+            f"醒来区间 {fmt(lo_ts)}~{fmt(hi_ts)}{note}"
+        )
 
     @filter.command("强制入睡")
     async def cmd_force_sleep(self, event: AstrMessageEvent, args=None):

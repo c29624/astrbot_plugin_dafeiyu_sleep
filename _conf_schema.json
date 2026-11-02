@@ -2,7 +2,7 @@
   "basic": {
     "description": "🌙 基础",
     "type": "object",
-    "hint": "总开关与作息模式；只想填5项就开「简单配置」，想逐项微调就关掉它",
+    "hint": "总开关与作息模式；只想填5项开「简单配置」；周末/单休/大小周想另算一套就开「休息日独立作息」",
     "items": {
       "enabled": {
         "description": "总开关",
@@ -19,6 +19,12 @@
       "quick_mode": {
         "description": "简单配置（懒人模式）",
         "hint": "开=入睡/起床/赖床参数全部由「快速设定」5项自动派生，下面详细区的对应项不生效；关=详细区逐项生效。仅随机作息模式开启时有用，固定模式不受影响",
+        "type": "bool",
+        "default": false
+      },
+      "rest_independent": {
+        "description": "休息日独立作息",
+        "hint": "开=「休息日」组的作息对醒来日是休息日的夜生效（熬夜偏移/赖床加成/独立窗）；关=每天完全同一套、无任何休息日行为。按醒来那天判：周五熬周六醒=休息日夜；周日晚（醒周一）永远走工作日作息",
         "type": "bool",
         "default": false
       }
@@ -145,28 +151,6 @@
         },
         "default": 1
       },
-      "weekend_extra_min": {
-        "description": "周末加成下限（分钟）",
-        "hint": "周末多睡多少：周六/周日醒来比平时多睡的分钟数，在'下限~上限'之间随机抽（默认30~90=多睡半小时到一个半小时，每个周末抽得不一样）。周末按醒来那天算：周五熬夜周六醒=算周末。想每周固定多睡就把下限上限填成一样。推荐20~45，默认30；简单配置开启时此项仍生效",
-        "type": "float",
-        "slider": {
-          "min": 0,
-          "max": 120,
-          "step": 5
-        },
-        "default": 30
-      },
-      "weekend_extra_max": {
-        "description": "周末加成上限（分钟）",
-        "hint": "周末多睡随机范围的上限（配上面的下限，多睡量在两者之间抽）；多睡再多也会被'最晚起床'收住、不会穿破。推荐60~120，默认90；简单配置开启时此项仍生效",
-        "type": "float",
-        "slider": {
-          "min": 30,
-          "max": 180,
-          "step": 5
-        },
-        "default": 90
-      },
       "wake_earliest": {
         "description": "最早起床",
         "hint": "推荐 06:30~07:30，默认 06:40；睡得再饱也不会早于这个点醒；⚠️简单配置开启时此项不生效（由快速设定派生）",
@@ -268,6 +252,108 @@
           "step": 5
         },
         "default": 50
+      }
+    }
+  },
+  "restday": {
+    "description": "🏖️ 休息日",
+    "type": "object",
+    "hint": "中国语境周末≠休息日：按你实际的休息制度判定（单休/双休/大小周+法定节假日+调休）。开启「基础→休息日独立作息」后，醒来日是休息日的夜走本组作息（窗留空=自动：入睡窗+30~60随机熬夜、起床=工作日窗+赖床加成）；时长/赖床概率/失眠/午睡沿用全局",
+    "items": {
+      "rest_schedule_type": {
+        "description": "休息制度",
+        "hint": "1=单休（只休一天）2=双休（默认，周六+周日）3=大小周（周日恒休，周六按周数奇偶交替）",
+        "type": "string",
+        "options": [
+          "1",
+          "2",
+          "3"
+        ],
+        "default": "2"
+      },
+      "rest_single_weekday": {
+        "description": "单休休哪天（仅休息制度=1）",
+        "hint": "绝大多数单休是周日休",
+        "type": "string",
+        "options": [
+          "周日",
+          "周六"
+        ],
+        "default": "周日"
+      },
+      "rest_alt_parity": {
+        "description": "大小周对齐（仅休息制度=3）",
+        "hint": "哪类周数的周六算休息；如果和你们实际大小周对不上，切一下这个选项即可（按ISO周号奇偶自动交替）",
+        "type": "string",
+        "options": [
+          "双周休周六",
+          "单周休周六"
+        ],
+        "default": "双周休周六"
+      },
+      "rest_holiday_follow": {
+        "description": "法定节假日跟随",
+        "hint": "开=法定节假日算休息日、调休补班日算工作日（数据来自 chinese-calendar 包；包未安装或年度过期自动降级纯星期判定并打日志）",
+        "type": "bool",
+        "default": true
+      },
+      "rest_extra_work_dates": {
+        "description": "补充工作日",
+        "hint": "手动指定哪些日期按工作日算（YYYY-MM-DD，覆盖一切，含节假日跟随）；临时加班日填这里",
+        "type": "list",
+        "default": []
+      },
+      "rest_extra_rest_dates": {
+        "description": "补充休息日",
+        "hint": "手动指定哪些日期按休息日算（YYYY-MM-DD）；年假/调休对不上包的日期填这里",
+        "type": "list",
+        "default": []
+      },
+      "rest_bed_earliest": {
+        "description": "休息日入睡窗·最早",
+        "hint": "留空=自动（工作日入睡窗+30~60分钟随机熬夜偏移）；想给休息日一套独立熬夜窗就填（须早于窗·最晚）",
+        "type": "string",
+        "default": ""
+      },
+      "rest_bed_latest": {
+        "description": "休息日入睡窗·最晚",
+        "hint": "留空=自动；基准自动=最早+窗宽×0.55、赖床阈值=窗末−30",
+        "type": "string",
+        "default": ""
+      },
+      "rest_wake_earliest": {
+        "description": "休息日起床窗·最早",
+        "hint": "留空=自动（工作日起床窗+下面的赖床加成）",
+        "type": "string",
+        "default": ""
+      },
+      "rest_wake_hardcap": {
+        "description": "休息日起床窗·硬顶",
+        "hint": "留空=自动；休息日再赖也绝不会晚于这个点醒",
+        "type": "string",
+        "default": ""
+      },
+      "weekend_extra_min": {
+        "description": "周末加成下限（分钟）",
+        "hint": "休息日多睡时长的随机下限（醒来的那天是休息日才生效，需开「休息日独立作息」）。想每周固定多睡就下限上限填一样。推荐15~30，默认30",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 120,
+          "step": 5
+        },
+        "default": 30
+      },
+      "weekend_extra_max": {
+        "description": "周末加成上限（分钟）",
+        "hint": "休息日多睡时长的随机上限（配上面的下限）；多睡再多也会被「最晚起床」收住。推荐30~60，默认90",
+        "type": "float",
+        "slider": {
+          "min": 30,
+          "max": 180,
+          "step": 5
+        },
+        "default": 90
       }
     }
   },
@@ -611,13 +697,19 @@
         "hint": "被叫醒后的窗口期间每轮注入（让她持续犯困不回正常语气）",
         "type": "text",
         "default": "[系统信息] 你刚被叫醒没多久，还没完全醒透，说话还带着困意。"
+      },
+      "perf_guide_template": {
+        "description": "表演指引（随晨间冲刷注入）",
+        "hint": "醒来首轮随夜间消息一起临时注入（不进历史）：怎么翻夜间消息、要不要汇报作息、深夜倾诉优先级等；写成人格无关的参考规则，语气由人设自由发挥",
+        "type": "text",
+        "default": "[系统信息-表演指引] 关于你刚睡醒，按你自己的性格和语气自然处理，以下几点供参考：不必逐条回应夜里收到的消息，像正常人翻手机，只挑有意思的接；不必主动汇报作息，被问起才说，十次里提两三次就好；如果夜里有人深夜倾诉情绪，优先关心那条；没睡醒的日子说话更蔫、句子更短、容易走神；午睡醒来被问就说刚才眯着了，不用系统式解释。"
       }
     }
   },
   "fixed": {
     "description": "🔒 固定模式",
     "type": "object",
-    "hint": "仅当随机作息模式关闭时生效；固定几点睡几点醒，无掷骰无失眠",
+    "hint": "仅当随机作息模式关闭时生效；固定几点睡几点醒+上班族式小抖动（无掷骰无失眠）",
     "items": {
       "fixed_bedtime": {
         "description": "固定入睡时刻",
@@ -630,6 +722,28 @@
         "hint": "仅随机模式关闭时生效",
         "type": "string",
         "default": "07:00"
+      },
+      "fixed_bed_jitter_max": {
+        "description": "入睡抖动上限（分钟）",
+        "hint": "上班族式毛边：每晚实际入睡在固定时刻之后 0~这个数 之间随机（沾床有快慢）。推荐10~30，默认20",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 60,
+          "step": 5
+        },
+        "default": 20
+      },
+      "fixed_wake_jitter_max": {
+        "description": "起床抖动上限（分钟）",
+        "hint": "闹钟+snooze的晃动：每早实际醒来在固定时刻之后 0~这个数 之间随机。推荐5~20，默认15；她永远不早于固定起床点醒",
+        "type": "float",
+        "slider": {
+          "min": 0,
+          "max": 60,
+          "step": 5
+        },
+        "default": 15
       }
     }
   }
