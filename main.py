@@ -90,7 +90,7 @@ except ImportError:
     At, Json, Plain = None, None, None
 
 PLUGIN_NAME = "astrbot_plugin_dafeiyu_sleep"
-PLUGIN_VERSION = "0.8.0"
+PLUGIN_VERSION = "0.8.1"
 STATE_FILE = "sleep_state.json"
 
 PHASE_AWAKE = "awake"
@@ -108,6 +108,7 @@ STAYUP_TIER_MIN = (45, 60, 240)  # 次日事实行分级：≥45轻 ≥60很困 
 NAP_RELIEVE_RATIO = 0.4    # 午睡缓解账本亏空的比例
 NAP_RELIEVE_CAP = 240      # 单次午睡最多抵的分钟数
 EARLY_BED_CAP = 90         # 次日早睡前移上限（分钟）
+SILENT_TIER_MAP = {"轻": 1, "中": 2, "重": 3, "从不": 99}  # v0.8.1 无声溜走从几档起可能（默认中）
 
 # ---- 默认值常量表（自洽：回落机制的最坏情况=零配置运行）----
 DEFAULTS = {
@@ -185,7 +186,8 @@ DEFAULTS = {
     # ---- v0.8.0 陪聊熬夜（懒人三开关 + 困意三档 + 次日分级事实）----
     "sleep_grace_on": True,
     "sleep_stayup_cost_on": True,
-    "sleep_sneak_ratio": 75.0,  # % 溜走时留一句嘟囔的概率（其余无声消失）
+    "sleep_sneak_ratio": 75.0,  # % 溜走时留一句嘟囔的概率（达到无声档位后剩余情况无声）
+    "sleep_sneak_silent_tier": "中",  # 无声溜走从几档起可能（轻/中/重/从不）
     "grace_drowsy_1_fact": (
         "[系统信息] 你开始有点困了——眼皮有点沉，反应慢了半拍，但还能聊。"
         "可以顺口提一句有点困，也可以不提；还不到告别的时候，自然聊。"
@@ -222,6 +224,11 @@ DEFAULTS = {
         "撑不住了，睡了睡了",
         "眼皮打架了，明天再聊",
     ],
+    "silent_slip_fact_template": (
+        "[系统信息] 你昨晚是聊着聊着直接睡着的——没来得及跟对方道别就断片了。"
+        "现在想起来，该自然地提一句（比如昨晚聊着聊着就睡着了、对方后面说的你早上才看到），"
+        "提一次就好，别过度道歉。"
+    ),
     "rest_independent": False,
     "rest_schedule_type": 2,
     "rest_single_weekday": "周日",
@@ -354,6 +361,7 @@ class DafeiyuSleepPlugin(Star):
         self._stayup_tier = 0  # 昨晚熬夜分级 0/1/2/3（次日事实行档）
         self._stayup_h = 0.0  # 昨晚熬夜小时数（渲染 {x} 用）
         self._last_dm_act = {}  # umo -> 私聊来言最后时刻（"到点正在聊"判定）
+        self._silent_slip = {}  # v0.8.1 无声溜走标记 {"date","umos"}（次日晨间补一句的依据）
 
     # ---------- 配置解析与校验（数值类：回落默认+WARNING；跨字段矛盾：双方回落） ----------
 
@@ -643,6 +651,12 @@ class DafeiyuSleepPlugin(Star):
         self.c_grace_on = bool(get("sleep_grace_on"))
         self.c_stayup_cost = bool(get("sleep_stayup_cost_on"))
         self.c_sneak_ratio = num("sleep_sneak_ratio", 0, 100)
+        _st = str(get("sleep_sneak_silent_tier") or DEFAULTS["sleep_sneak_silent_tier"]).strip()
+        if _st not in SILENT_TIER_MAP:
+            self._warn("sleep_sneak_silent_tier", f"须为 {'/'.join(SILENT_TIER_MAP)}")
+            _st = DEFAULTS["sleep_sneak_silent_tier"]
+        self.c_silent_tier = _st
+        self.tpl_silent_slip = str(get("silent_slip_fact_template"))
         self.tpl_drowsy_1 = str(get("grace_drowsy_1_fact"))
         self.tpl_drowsy_2 = str(get("grace_drowsy_2_fact"))
         self.tpl_drowsy_3 = str(get("grace_drowsy_3_fact"))
@@ -798,6 +812,7 @@ class DafeiyuSleepPlugin(Star):
             self._next_early_bed = float(data.get("next_early_bed", 0) or 0)
             self._stayup_tier = int(data.get("stayup_tier", 0) or 0)
             self._stayup_h = float(data.get("stayup_h", 0) or 0)
+            self._silent_slip = data.get("silent_slip") or {}
         except Exception:
             logger.warning("[睡觉] 状态文件损坏，按全新状态启动（缓冲可能丢失）")
 
@@ -826,6 +841,7 @@ class DafeiyuSleepPlugin(Star):
                 "next_early_bed": self._next_early_bed,
                 "stayup_tier": self._stayup_tier,
                 "stayup_h": self._stayup_h,
+                "silent_slip": self._silent_slip,
                 "drowsy_level": self._drowsy_level_now(),
                 "saved_at": time.time(),
             }
@@ -1268,8 +1284,12 @@ class DafeiyuSleepPlugin(Star):
             return
         cold = float(g.get("cold_gap") or 6.0) * 60
         if now - float(g.get("last_act") or now) >= cold:
+            # v0.8.1 档位门控：困到设定档位（默认中）才可能无声——轻档必打招呼；
+            # 达标后按嘟囔比例掷，无声时记标记（次日晨间补一句"聊着聊着睡着"）
+            lv = self._grace_level(now)
+            silent_ok = lv >= SILENT_TIER_MAP.get(self.c_silent_tier, 2)
             mutter = None
-            if random.random() * 100 < self.c_sneak_ratio:
+            if (not silent_ok) or random.random() * 100 < self.c_sneak_ratio:
                 mutter = await self._gen_mutter(self.tpl_sneak)
             await self._grace_sleep(now, "冷场溜走", mutter=mutter)
 
@@ -1285,6 +1305,15 @@ class DafeiyuSleepPlugin(Star):
         self._stayup_tier = self._stayup_tier_of(stayup_min)
         self._stayup_h = round(stayup_min / 60.0, 1)
         self._next_early_bed = round(min(stayup_min * 0.5, EARLY_BED_CAP), 1)
+        # v0.8.1 无声溜走标记：冷场无声走人才记（硬顶必留一句不算）——次日晨间补话依据
+        if mutter is None and why == "冷场溜走" and g.get("last_umo"):
+            today = datetime.now().date().isoformat()
+            ss = self._silent_slip
+            if not isinstance(ss, dict) or ss.get("date") != today:
+                ss = {"date": today, "umos": []}
+            if g["last_umo"] not in ss["umos"]:
+                ss["umos"].append(g["last_umo"])
+            self._silent_slip = ss
         if mutter:
             umo = g.get("last_umo")
             if umo and now - float(g.get("last_act") or 0) <= 1800:
@@ -1841,6 +1870,24 @@ class DafeiyuSleepPlugin(Star):
         except Exception:
             logger.warning("[睡觉] 梦话发送失败（不影响缓冲）", exc_info=True)
 
+    def _silent_slip_part(self, umo: str, consume: bool = True) -> str:
+        """v0.8.1 次日晨间补话：昨晚无声溜走（聊着聊着睡着）→ 返回事实行（一次性消耗）。
+        跨一天未消耗的标记视为过期（他第二天都没来提，再提就尬了）"""
+        ss = self._silent_slip or {}
+        if not ss.get("umos") or umo not in ss["umos"]:
+            return ""
+        slip_day = str(ss.get("date") or "")
+        today = datetime.now().date().isoformat()
+        yesterday = (datetime.now().date() - timedelta(days=1)).isoformat()
+        if slip_day not in (today, yesterday):
+            self._silent_slip = {}
+            return ""
+        if consume:
+            umos = [u for u in ss["umos"] if u != umo]
+            self._silent_slip = {"date": ss.get("date"), "umos": umos} if umos else {}
+            self._save_state()
+        return self.tpl_silent_slip
+
     def _flush_morning_into(self, event: AstrMessageEvent, umo: str):
         """晨间冲刷：夜间消息本体拼进消息链（入历史→反思引擎可读），事实行走 extra 注入。
         v0.8.0 E：主动私聊已代答留言（标记文件在）→ 跳过冲刷表演（留言已被她的
@@ -1862,6 +1909,7 @@ class DafeiyuSleepPlugin(Star):
                         self._morning_flushed = mf
                     if umo not in mf["umos"]:
                         mf["umos"].append(umo)
+                    self._silent_slip_part(umo)  # dm 代答会提"聊着聊着睡着"，这里消耗防双提
                     self._save_state()
                     logger.info(f"[睡觉] 晨间冲刷跳过（主动私聊已代答留言）：{umo} {len(buf)} 条")
                     return
@@ -1925,6 +1973,10 @@ class DafeiyuSleepPlugin(Star):
                         msg_count=info["msg_count"],
                     )
                 )
+                # v0.8.1 昨晚聊着聊着睡着（无声溜走）→ 晨间自然补一句
+                slip = self._silent_slip_part(umo)
+                if slip:
+                    parts.append(slip)
                 # 被叫醒状态行（午睡版轻度迷糊、夜间版半梦半醒）
                 if info.get("woken") == "nap":
                     parts.append(self.tpl_nap_woken)
