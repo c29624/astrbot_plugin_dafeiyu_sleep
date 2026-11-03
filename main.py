@@ -1,4 +1,4 @@
-"""大肥鱼·随机睡觉插件 v0.2（实施顺序第 2 步）
+"""大肥鱼·随机睡觉插件 v0.7.0（六步全部完成 + 安全闸门）
 
 第 1 步（v0.1/v0.1.1，已完成并实测）：
 - 守门拦截器 priority=sys.maxsize-10 + fail-open（异常=放行+ERROR）
@@ -43,7 +43,19 @@ v0.3.1：新增"梦话"——睡眠期被戳（私聊/群里@她/戳一戳）按
 - 睡眠债结算：临时清醒 N 分钟 → 起床顺延 N×折算比例（默认50%），作用于当夜窗口
 - 午睡被叫醒=直接结束转清醒（不进临时清醒，维持第3步行为）
 
-后续步骤：⑤午睡补偿+没睡醒 ⑥内置指引+配置页打磨
+第 5 步（v0.5.0）：午睡补偿+没睡醒——失眠/熬夜（入睡晚于赖床阈值）资格，次日 13:00~15:00
+随机时刻按概率眯 15~30 分钟（守门/缓冲/叫醒全同夜间）；没睡醒状态行白天持续注入，
+抽中午睡蔫到午睡结束、没抽中蔫到 17:00；收口抖动（撞地板+0~10min、顶硬顶−5~0min）消整点感
+
+第 6 步（v0.6.0）：休息日体系+内置指引——休息制度 1单休/2双休/3大小周 + 法定节假日跟随
+（chinese-calendar，缺包降级纯星期）+ 补充工作/休息名单，按"醒来那天"判夜；休息日独立作息窗
+（留空=工作日窗+30~60分钟随机熬夜偏移）；固定模式上班族抖动（入睡0~20/起床0~15分钟）；
+/作息分布 模拟指令（100晚直方图）；表演指引随晨间冲刷注入（人格无关五条）
+
+第 7 步（v0.7.0）：安全闸门——LLM 闸门堵"/必回后门"（/前缀未命中指令的文本被框架剥前缀
+当唤醒消息 100% 必回、绕过读空气概率：非管理员静默，真指令/链接解析不受影响）；管理员暗门
+睡眠期放行并注入梦话状态行；夜间裸链接放行给解析器（LLM 有闸门兜底）；自回显不进夜间缓冲；
+午睡豁免两旋钮（休息日免午睡 / 睡够 X 小时免午睡）
 """
 
 import asyncio
@@ -73,12 +85,12 @@ except ImportError:  # 版本变动时的兜底（fail-open：注入失败不拦
     TextPart = None
 
 try:
-    from astrbot.core.message.components import At, Plain
+    from astrbot.core.message.components import At, Json, Plain
 except ImportError:
-    At, Plain = None, None
+    At, Json, Plain = None, None, None
 
 PLUGIN_NAME = "astrbot_plugin_dafeiyu_sleep"
-PLUGIN_VERSION = "0.6.0"
+PLUGIN_VERSION = "0.7.0"
 STATE_FILE = "sleep_state.json"
 
 PHASE_AWAKE = "awake"
@@ -145,6 +157,8 @@ DEFAULTS = {
     "quick_oversleep_max_min": 40.0,
     "nap_enabled": True,
     "nap_chance": 40.0,
+    "nap_skip_rest": False,
+    "nap_enough_hours": 0.0,
     "nap_window_start": "13:00",
     "nap_window_end": "15:00",
     "nap_duration_min": 15.0,
@@ -172,6 +186,13 @@ DEFAULTS = {
         "午睡醒来被问就说刚才眯着了，不用系统式解释。"
     ),
     "nicknames": ["大肥鱼", "肥鱼", "小鲸鱼"],
+    "slash_gate": True,
+    "slash_gate_admin_pass": True,
+    "night_link_pass": True,
+    "night_whisper_template": (
+        "[系统信息] 你正在熟睡，被这条消息半梦半醒地牵动，迷迷糊糊回了句——"
+        "回复要短、含糊、带着睡意，别清醒，别提系统。"
+    ),
     "temp_wake_fact_template": "[系统信息] 你刚被叫醒没多久，还没完全醒透，说话还带着困意。",
     "farewell_llm_enabled": True,
     "farewell_prompt_template": "你要继续睡了，按你平时的语气跟对方道个别。就一句话，短短的，别提任何系统或指令，别解释原因。",
@@ -526,6 +547,8 @@ class DafeiyuSleepPlugin(Star):
         # ---- 午睡补偿 + 没睡醒（第5步：熬夜次日的午后彩蛋） ----
         self.c_nap_on = bool(get("nap_enabled"))
         self.c_nap_chance = num("nap_chance", 0, 100)
+        self.c_nap_skip_rest = bool(get("nap_skip_rest"))
+        self.c_nap_enough = num("nap_enough_hours", 0, 12)
         nv_lo = _parse_hhmm(get("nap_window_start"))
         nv_hi = _parse_hhmm(get("nap_window_end"))
         if nv_lo is None or nv_hi is None or nv_lo >= nv_hi:
@@ -603,6 +626,15 @@ class DafeiyuSleepPlugin(Star):
         if not isinstance(raw_fw, list):
             raw_fw = DEFAULTS["farewell_pool"]
         self.c_farewell_pool = tuple(dict.fromkeys(str(s).strip() for s in raw_fw if str(s).strip()))
+        # ---- 闸门（v0.7.0：/非指令必回后门 + 睡眠期 LLM 兜底）----
+        self.c_gate_on = bool(cfg.get("slash_gate", DEFAULTS["slash_gate"]))
+        self.c_gate_admin_pass = bool(
+            cfg.get("slash_gate_admin_pass", DEFAULTS["slash_gate_admin_pass"])
+        )
+        self.c_night_link_pass = bool(cfg.get("night_link_pass", DEFAULTS["night_link_pass"]))
+        self.tpl_night_whisper = str(
+            cfg.get("night_whisper_template", DEFAULTS["night_whisper_template"])
+        )
 
     # ---------- 生命周期 ----------
 
@@ -1054,6 +1086,11 @@ class DafeiyuSleepPlugin(Star):
             return
         if not (ln.get("insomnia") or ln.get("late_bed")):
             return
+        # v0.7.0 补充豁免：休息日睡到饱（按那晚的 rest 判定）不补觉；实际睡眠够长也不补觉
+        if self.c_nap_skip_rest and ln.get("rest"):
+            return
+        if self.c_nap_enough > 0 and (wake_ts - ln.get("bed_ts", wake_ts)) / 3600.0 >= self.c_nap_enough:
+            return
         day = datetime.fromtimestamp(wake_ts).date()
         lo = datetime.combine(day, self.c_nap_lo).timestamp()
         hi = datetime.combine(day, self.c_nap_hi).timestamp()
@@ -1135,6 +1172,10 @@ class DafeiyuSleepPlugin(Star):
         text = (event.message_str or "").strip()
         if self._is_command(event, text):
             return  # 指令豁免：睡觉不影响干活
+        if self._is_self_echo(event):
+            if self.phase == PHASE_SLEEPING:
+                event.stop_event()  # 自回显（她夜里发出的工具产物）不进夜间缓冲
+            return
 
         async with self._lock:
             if self.phase in (PHASE_AWAKE, PHASE_TEMP_WAKE):
@@ -1152,10 +1193,81 @@ class DafeiyuSleepPlugin(Star):
             if wake_kind:
                 await self._wake_by_channel(event, umo, wake_kind)
                 return  # 不 stop_event：叫醒消息正常走管线，她半梦半醒地回
+            if self.c_night_link_pass and self._has_link(event, text):
+                return  # 夜间裸链接放行给解析器等工具直回（LLM 有闸门兜底，不进对话）
             self._buffer_message(event, umo, text)
         event.stop_event()
         self._save_state()
         await self._maybe_sleep_talk(event, umo)
+
+    def _is_self_echo(self, event: AstrMessageEvent) -> bool:
+        """她自己的出站消息回显（NapCat message_sent 等）：不算任何人发的消息"""
+        try:
+            return str(event.get_sender_id() or "") == str(event.get_self_id() or "")
+        except Exception:
+            return False
+
+    def _has_link(self, event: AstrMessageEvent, text: str) -> bool:
+        """消息里带链接（文本 URL 或 Json 分享卡片）"""
+        if "http://" in text or "https://" in text or "www." in text:
+            return True
+        try:
+            for comp in event.get_messages():
+                if Json is not None and isinstance(comp, Json):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _has_command_handler(self, event: AstrMessageEvent) -> bool:
+        """框架唤醒阶段是否有注册指令命中本条消息（拿不到注册表=fail-open 放行）"""
+        try:
+            from astrbot.core.star.filter.command import CommandFilter
+
+            for h in event.get_extra("activated_handlers") or []:
+                for f in getattr(h, "event_filters", None) or []:
+                    if isinstance(f, CommandFilter):
+                        return True
+        except Exception:
+            return True
+        return False
+
+    def _llm_gate(self, event: AstrMessageEvent):
+        """LLM 闸门（on_llm_request 最前）：返回 ("pass"|"stop"|"whisper", 原因)。
+        ① /前缀且没命中任何注册指令 = "必回后门"（框架剥前缀当唤醒、chat_plus 指令过滤跳过、
+        默认 LLM 兜底 100% 回复）：非管理员拦；管理员可放行（默认，睡眠中附梦话状态行）。
+        ② 睡眠期兜底：走到 LLM 这一步的非管理员调用（裸链接放行等豁免路径漏进来的）一律拦，
+        保证睡着时除管理员暗门外绝不进对话。临时清醒/晨间是别的 phase，不受影响。
+        """
+        if not self.c_gate_on:
+            return "pass", ""
+        try:
+            umo = event.unified_msg_origin
+            if ":FriendMessage:" not in umo and ":GroupMessage:" not in umo:
+                return "pass", ""  # WebChat 等平台是主人自己的控制台，不管
+        except Exception:
+            pass
+        try:
+            head = self._chain_head_text(event)
+            slashy = bool(self.cmd_prefixes) and head.startswith(self.cmd_prefixes)
+        except Exception:
+            slashy = False
+        admin = self._is_admin(event)
+        has_cmd = self._has_command_handler(event)
+        if slashy and not has_cmd:
+            if admin and self.c_gate_admin_pass:
+                if self.phase == PHASE_SLEEPING:
+                    return "whisper", "管理员深夜暗门"
+                return "pass", "管理员暗门"
+            return "stop", f"/非指令必回后门 sender={event.get_sender_id()}"
+        if (
+            self.phase == PHASE_SLEEPING
+            and not has_cmd
+            and not (admin and self.c_gate_admin_pass)
+        ):
+            # 兜底只打默认对话路径：真指令发起的 LLM 调用（has_cmd）不拦，睡觉不影响干活
+            return "stop", "睡眠期兜底"
+        return "pass", ""
 
     def _buffer_message(self, event: AstrMessageEvent, umo: str, text: str):
         entry_text = text
@@ -1439,9 +1551,17 @@ class DafeiyuSleepPlugin(Star):
         try:
             if TextPart is None or req is None:
                 return
+            action, why = self._llm_gate(event)
+            if action == "stop":
+                event.stop_event()  # 框架在调模型前中止本次 LLM 请求（官方支持的否决通道）
+                logger.info(f"[睡觉] LLM 闸门拦截：{why}")
+                return
             umo = event.unified_msg_origin
             info = self._morning_pending.pop(umo + "#fact", None)
             parts = []
+            if action == "whisper":
+                # 管理员深夜暗门：放行但带梦话状态行，演出成立
+                parts.append(self.tpl_night_whisper)
             if info:
                 parts.append(
                     _render(
