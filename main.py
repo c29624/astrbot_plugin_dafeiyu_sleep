@@ -90,12 +90,24 @@ except ImportError:
     At, Json, Plain = None, None, None
 
 PLUGIN_NAME = "astrbot_plugin_dafeiyu_sleep"
-PLUGIN_VERSION = "0.7.2"
+PLUGIN_VERSION = "0.8.0"
 STATE_FILE = "sleep_state.json"
 
 PHASE_AWAKE = "awake"
 PHASE_SLEEPING = "sleeping"
 PHASE_TEMP_WAKE = "temp_wake"
+
+# ---- v0.8.0 陪聊熬夜常量（代码级，不暴露配置——懒人三开关之外全走默认）----
+GRACE_ACT_WIN_MIN = 10     # 到点"正在聊"判定：最近 10 分钟内有私聊来言
+GRACE_COLD_LO, GRACE_COLD_HI = 5.0, 8.0   # 冷场窗口 U(5,8) 每夜随机
+GRACE_STEP_CHOICES = (30, 45, 60)          # 困意爬坡升档间隔（分钟，每夜随机抽）
+GRACE_HARD_CAP_MIN = 240   # 4 小时硬顶（账本亏空按阶梯收缩）
+GRACE_LADDER = ((180, 240), (360, 90), (600, 30))  # 7天亏空(min)→当晚陪聊上限(min)；>600=不陪
+DEFICIT_FAST_MIN = 180     # 亏空≥3h → 爬坡加速（起点+1档、间隔减半）
+STAYUP_TIER_MIN = (45, 60, 240)  # 次日事实行分级：≥45轻 ≥60很困 ≥240通宵
+NAP_RELIEVE_RATIO = 0.4    # 午睡缓解账本亏空的比例
+NAP_RELIEVE_CAP = 240      # 单次午睡最多抵的分钟数
+EARLY_BED_CAP = 90         # 次日早睡前移上限（分钟）
 
 # ---- 默认值常量表（自洽：回落机制的最坏情况=零配置运行）----
 DEFAULTS = {
@@ -170,6 +182,46 @@ DEFAULTS = {
     "nap_duration_min": 15.0,
     "nap_duration_max": 30.0,
     "drowsy_fact_template": "[系统信息] 你昨晚熬夜了，今天没睡醒。",
+    # ---- v0.8.0 陪聊熬夜（懒人三开关 + 困意三档 + 次日分级事实）----
+    "sleep_grace_on": True,
+    "sleep_stayup_cost_on": True,
+    "sleep_sneak_ratio": 75.0,  # % 溜走时留一句嘟囔的概率（其余无声消失）
+    "grace_drowsy_1_fact": (
+        "[系统信息] 你开始有点困了——眼皮有点沉，反应慢了半拍，但还能聊。"
+        "可以顺口提一句有点困，也可以不提；还不到告别的时候，自然聊。"
+    ),
+    "grace_drowsy_2_fact": (
+        "[系统信息] 你很困了——哈欠一个接一个，思路偶尔打结，话变短，"
+        "有时话说到一半会忘词、打错字。嘴上可能会冒出\"好想睡觉\"\"特别想睡\"，"
+        "也可能带点小情绪（怪自己怎么还不困、嫌TA还没说完），但还在撑着陪。"
+    ),
+    "grace_drowsy_3_fact": (
+        "[系统信息] 你困得不行了——意识一阵一阵地断，句子碎成几个字，"
+        "打字开始出错、有时只剩省略号，眼皮完全抬不起来。之前嘴硬说不困的，"
+        "这时候也扛不住了，会小声承认\"特别特别想睡\"。人已经快撑不住，"
+        "随时可能聊着聊着就睡着了。"
+    ),
+    "stayup_light_fact": "[系统信息] 你昨晚比平时晚睡了{x}分钟，今天有点困倦——不明显，但状态一般。",
+    "stayup_heavy_fact": "[系统信息] 你昨晚熬了{x}小时才睡，今天很困——比平常困得明显，容易走神、话变短。",
+    "stayup_allnight_fact": (
+        "[系统信息] 你昨晚通宵了——整整撑了{x}小时才去睡{is_rest}。"
+        "今天是硬撑的状态：反应慢、话少、随时想眯，别演得精神抖擞。"
+    ),
+    "grace_sneak_template": (
+        "你困得不行了，对方还没回消息，你决定不等了、偷偷溜去睡。"
+        "给TA留一句嘟囔——很短，像半梦半醒随手打出来的，别提具体时间，"
+        "也别正式道别（你不是在告别，是撑不住先走了）。就一句。"
+    ),
+    "grace_hardcap_template": (
+        "你已经熬到极限了，意识都在断片，对方还在说话，但你真的撑不住必须去睡了。"
+        "断断续续留最后一两句——字可能都打不全，别提具体时间。"
+    ),
+    "grace_bye_pool": [
+        "唔…到点了，我先睡啦",
+        "困了，先去睡了",
+        "撑不住了，睡了睡了",
+        "眼皮打架了，明天再聊",
+    ],
     "rest_independent": False,
     "rest_schedule_type": 2,
     "rest_single_weekday": "周日",
@@ -295,6 +347,13 @@ class DafeiyuSleepPlugin(Star):
         self._lock = asyncio.Lock()
         self._tick_task = None
         self._data_dir = None
+        # ---- v0.8.0 陪聊熬夜 ----
+        self._grace = None  # 宽限中 {bed_ts, wake_ts, cold_gap, last_act, hard_cap, step_min, level, start_level, last_umo}
+        self._stayup_ledger = []  # 滚动账本 [{date, stayup_min}]（负数=午睡抵扣），7 天窗口
+        self._next_early_bed = 0.0  # 今晚早睡前移量（分钟，昨晚熬夜×0.5 钳 90）
+        self._stayup_tier = 0  # 昨晚熬夜分级 0/1/2/3（次日事实行档）
+        self._stayup_h = 0.0  # 昨晚熬夜小时数（渲染 {x} 用）
+        self._last_dm_act = {}  # umo -> 私聊来言最后时刻（"到点正在聊"判定）
 
     # ---------- 配置解析与校验（数值类：回落默认+WARNING；跨字段矛盾：双方回落） ----------
 
@@ -580,6 +639,22 @@ class DafeiyuSleepPlugin(Star):
             self.c_nap_dur_min = DEFAULTS["nap_duration_min"]
             self.c_nap_dur_max = DEFAULTS["nap_duration_max"]
 
+        # ---- v0.8.0 陪聊熬夜（懒人三开关） ----
+        self.c_grace_on = bool(get("sleep_grace_on"))
+        self.c_stayup_cost = bool(get("sleep_stayup_cost_on"))
+        self.c_sneak_ratio = num("sleep_sneak_ratio", 0, 100)
+        self.tpl_drowsy_1 = str(get("grace_drowsy_1_fact"))
+        self.tpl_drowsy_2 = str(get("grace_drowsy_2_fact"))
+        self.tpl_drowsy_3 = str(get("grace_drowsy_3_fact"))
+        self.tpl_stayup_light = str(get("stayup_light_fact"))
+        self.tpl_stayup_heavy = str(get("stayup_heavy_fact"))
+        self.tpl_stayup_allnight = str(get("stayup_allnight_fact"))
+        self.tpl_sneak = str(get("grace_sneak_template"))
+        self.tpl_hardcap = str(get("grace_hardcap_template"))
+        _gp = get("grace_bye_pool")
+        self.grace_bye_pool = [str(x).strip() for x in (_gp or []) if str(x).strip()] \
+            or list(DEFAULTS["grace_bye_pool"])
+
         # ---- 休息日体系（第6步：周末≠休息日，大小周/单休/调休） ----
         self.rest_independent = bool(get("rest_independent"))
         self.c_rest_type = num("rest_schedule_type", 1, 3, int)
@@ -718,6 +793,11 @@ class DafeiyuSleepPlugin(Star):
             self._drowsy_until = float(data.get("drowsy_until", 0) or 0)
             self._fixed_jit = data.get("fixed_jit")
             self._morning_flushed = data.get("morning_flushed") or {}
+            self._grace = data.get("grace")
+            self._stayup_ledger = data.get("stayup_ledger") or []
+            self._next_early_bed = float(data.get("next_early_bed", 0) or 0)
+            self._stayup_tier = int(data.get("stayup_tier", 0) or 0)
+            self._stayup_h = float(data.get("stayup_h", 0) or 0)
         except Exception:
             logger.warning("[睡觉] 状态文件损坏，按全新状态启动（缓冲可能丢失）")
 
@@ -741,6 +821,12 @@ class DafeiyuSleepPlugin(Star):
                 "drowsy_until": self._drowsy_until,
                 "fixed_jit": self._fixed_jit,
                 "morning_flushed": self._morning_flushed,
+                "grace": self._grace,
+                "stayup_ledger": self._stayup_ledger,
+                "next_early_bed": self._next_early_bed,
+                "stayup_tier": self._stayup_tier,
+                "stayup_h": self._stayup_h,
+                "drowsy_level": self._drowsy_level_now(),
                 "saved_at": time.time(),
             }
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -1040,18 +1126,20 @@ class DafeiyuSleepPlugin(Star):
                 ):
                     await self._back_to_sleep("冷场")
             else:
-                if self.schedule_random:
+                # v0.8.0 宽限中：冷场/硬顶由宽限自己的钟接管，常规入睡判定暂停
+                if self._grace is not None:
+                    await self._grace_tick(now)
+                elif self.schedule_random:
                     self._ensure_tonight(now_dt)
                     n = self._night
                     if n and n["bed_ts"] <= now:
-                        await self._enter_sleep(
-                            n["bed_ts"], n["wake_ts"], note=f"（今日抽签 {_fmt_hm(n['bed_ts'])}）"
-                        )
+                        await self._bed_reached(now, n["bed_ts"], n["wake_ts"],
+                                                note=f"（今日抽签 {_fmt_hm(n['bed_ts'])}）")
                 else:
                     bed, wake = self._natural_window(now_dt)
                     if bed.timestamp() <= now < wake.timestamp():
-                        await self._enter_sleep(bed.timestamp(), wake.timestamp())
-                if self._nap_plan and self.phase == PHASE_AWAKE:
+                        await self._bed_reached(now, bed.timestamp(), wake.timestamp())
+                if self._nap_plan and self.phase == PHASE_AWAKE and self._grace is None:
                     if now >= self._nap_plan["end_ts"] + 600:  # 窗口彻底错过（重载/强制状态）→ 作废
                         self._nap_plan = None
                         self._save_state()
@@ -1060,6 +1148,199 @@ class DafeiyuSleepPlugin(Star):
                         await self._enter_sleep(
                             plan["at_ts"], plan["end_ts"], note="（午睡补偿）", nap=True
                         )
+
+    # ---------- v0.8.0 陪聊熬夜（宽限/困意爬坡/熬夜账本） ----------
+
+    def _prune_ledger(self):
+        """熬夜账本只留最近 7 天（负数条目=午睡抵扣，随窗口一起淡出）"""
+        cut = (datetime.now().date() - timedelta(days=7)).isoformat()
+        self._stayup_ledger = [e for e in (self._stayup_ledger or [])
+                               if str(e.get("date", "")) > cut]
+
+    def _ledger_deficit(self) -> float:
+        self._prune_ledger()
+        return sum(float(e.get("stayup_min") or 0) for e in self._stayup_ledger)
+
+    def _grace_allowance_min(self) -> float:
+        """7 天亏空 → 今晚陪聊上限阶梯：<3h→4h / 3~6h→90m / 6~10h→30m / ≥10h→不陪"""
+        d = self._ledger_deficit()
+        for thr, cap in GRACE_LADDER:
+            if d < thr:
+                return float(cap)
+        return 0.0
+
+    @staticmethod
+    def _stayup_tier_of(stayup_min: float) -> int:
+        if stayup_min >= STAYUP_TIER_MIN[2]:
+            return 3
+        if stayup_min >= STAYUP_TIER_MIN[1]:
+            return 2
+        if stayup_min >= STAYUP_TIER_MIN[0]:
+            return 1
+        return 0
+
+    def _last_grace_umo(self, now: float):
+        """最近 30 分钟内最后说话的私聊会话（溜走嘟囔发给谁）"""
+        best, bt = None, 0.0
+        for umo, ts in (self._last_dm_act or {}).items():
+            if float(ts) > bt:
+                best, bt = umo, float(ts)
+        if best and now - bt <= 30 * 60:
+            return best, bt
+        return None, 0.0
+
+    def _drowsy_level_now(self) -> int:
+        """当前困倦档 0~3（state 落盘供主动私聊读取：宽限=爬坡档；次日=熬夜档钳2）"""
+        if self._grace is not None:
+            return self._grace_level(time.time())
+        if self.phase == PHASE_AWAKE and time.time() < self._drowsy_until:
+            return min(2, self._stayup_tier) if self.c_stayup_cost else 0
+        return 0
+
+    def _grace_level(self, now: float) -> int:
+        """困意爬坡档位：起点+经过时长÷升档间隔；后段必到重档（硬顶前25%≥2档、
+        最后30分钟=3档）——保证溜走/截断时她一定困得说不出整句"""
+        g = self._grace or {}
+        bed_ts = float(g.get("bed_ts") or now)
+        hard_cap = float(g.get("hard_cap") or now + GRACE_HARD_CAP_MIN * 60)
+        step = max(10.0, float(g.get("step_min") or 45.0))
+        start_level = max(1, int(g.get("start_level") or 1))
+        lv = start_level + int((now - bed_ts) / (step * 60))
+        lv = max(1, min(3, lv))
+        if hard_cap - now <= 30 * 60:
+            lv = 3
+        elif hard_cap - now <= (hard_cap - bed_ts) * 0.25:
+            lv = max(lv, 2)
+        return lv
+
+    async def _bed_reached(self, now: float, bed_ts: float, wake_ts: float, note: str = ""):
+        """到点入睡的三岔口：没在聊→直接睡（v0.7 原样）；在聊+宽限开→进陪聊宽限；
+        在聊+宽限关/亏空到顶→不陪但好好道个别（一句，语料池直出零 token）"""
+        chatting = any(now - float(ts) <= GRACE_ACT_WIN_MIN * 60
+                       for ts in (self._last_dm_act or {}).values())
+        if not chatting:
+            await self._enter_sleep(bed_ts, wake_ts, note=note)
+            return
+        allow = self._grace_allowance_min() if self.c_grace_on else 0.0
+        if allow <= 0:
+            umo, _ = self._last_grace_umo(now)
+            if umo:
+                try:
+                    await self.context.send_message(
+                        umo, MessageChain().message(random.choice(self.grace_bye_pool)))
+                    logger.info(f"[睡觉] 到点在聊但宽限关/额度用尽：道别后入睡（{umo}）")
+                except Exception:
+                    logger.warning("[睡觉] 道别发送失败（不影响入睡）", exc_info=True)
+            await self._enter_sleep(bed_ts, wake_ts, note="（宽限关，道别即睡）")
+            return
+        await self._enter_grace(now, bed_ts, wake_ts, allow)
+
+    async def _enter_grace(self, now: float, bed_ts: float, wake_ts: float, allow_min: float):
+        last_umo, last_act = self._last_grace_umo(now)
+        step = float(random.choice(GRACE_STEP_CHOICES))
+        start_level = 2 if (self._last_night or {}).get("insomnia") else 1  # 失眠夜中档起
+        if self._ledger_deficit() >= DEFICIT_FAST_MIN:  # 亏空≥3h→爬坡加速
+            start_level = min(3, start_level + 1)
+            step = step / 2.0
+        self._grace = {
+            "bed_ts": bed_ts, "wake_ts": wake_ts,
+            "cold_gap": round(random.uniform(GRACE_COLD_LO, GRACE_COLD_HI), 1),
+            "last_act": last_act or now, "last_umo": last_umo,
+            "hard_cap": now + allow_min * 60,
+            "step_min": step, "start_level": start_level, "allow_min": allow_min,
+        }
+        self._save_state()
+        logger.info(
+            f"[睡觉] 到点还在聊→陪聊宽限（冷场 {self._grace['cold_gap']} 分钟溜走，"
+            f"陪聊上限 {allow_min:.0f} 分钟至 {_fmt_hm(self._grace['hard_cap'])}，"
+            f"困意爬坡 {step:.0f} 分钟/档从 {start_level} 档起）"
+        )
+
+    async def _grace_tick(self, now: float):
+        """宽限中的两条出路：冷场到点偷偷溜走（嘟囔比例掷）/ 硬顶截断（必留一句）"""
+        g = self._grace
+        if not g:
+            return
+        hard_cap = float(g.get("hard_cap") or 0)
+        if hard_cap and now >= hard_cap:
+            mutter = await self._gen_mutter(self.tpl_hardcap)
+            await self._grace_sleep(now, "硬顶截断", mutter=mutter)
+            return
+        cold = float(g.get("cold_gap") or 6.0) * 60
+        if now - float(g.get("last_act") or now) >= cold:
+            mutter = None
+            if random.random() * 100 < self.c_sneak_ratio:
+                mutter = await self._gen_mutter(self.tpl_sneak)
+            await self._grace_sleep(now, "冷场溜走", mutter=mutter)
+
+    async def _grace_sleep(self, now: float, why: str, mutter: str = None):
+        """宽限收尾：熬夜入账本→次日后果数据面→嘟囔→入睡（起床按债顺延）"""
+        g = self._grace or {}
+        bed_ts = float(g.get("bed_ts") or now)
+        stayup_min = max(0.0, (now - bed_ts) / 60.0)
+        self._stayup_ledger.append({"date": datetime.now().date().isoformat(),
+                                    "stayup_min": round(stayup_min, 1)})
+        self._prune_ledger()
+        # 次日后果数据面（代价开关关=当场演出保留、次日全免；账本照记随窗口淡出）
+        self._stayup_tier = self._stayup_tier_of(stayup_min)
+        self._stayup_h = round(stayup_min / 60.0, 1)
+        self._next_early_bed = round(min(stayup_min * 0.5, EARLY_BED_CAP), 1)
+        if mutter:
+            umo = g.get("last_umo")
+            if umo and now - float(g.get("last_act") or 0) <= 1800:
+                try:
+                    await self.context.send_message(umo, MessageChain().message(mutter))
+                except Exception:
+                    logger.warning("[睡觉] 溜走嘟囔发送失败（不影响入睡）", exc_info=True)
+        self._grace = None
+        wake_ts = float(g.get("wake_ts") or now + 8 * 3600)
+        await self._enter_sleep(now, wake_ts, note="（陪聊宽限后入睡）")
+        # 起床顺延走既有睡眠债通道（_apply_debt 内部再乘比例）；休息日补觉总量
+        # （周末加成+债顺延）钳 180——先按比例折算再钳，反解传给 debt 的分钟数
+        ratio = max(1.0, self.c_debt_ratio)
+        debt_pass = stayup_min
+        n = self._night or {}
+        if n.get("rest"):
+            wk = float(n.get("weekend_extra") or 0)
+            max_extra = max(0.0, 180.0 - wk)
+            debt_pass = min(stayup_min, max_extra * 100.0 / ratio)
+        if debt_pass > 0:
+            await self._apply_debt(debt_pass)
+        logger.info(
+            f"[睡觉] 宽限结束（{why}，熬夜 {stayup_min:.0f} 分钟入账，"
+            f"7天亏空 {self._ledger_deficit():.0f} 分钟，明日早睡 {self._next_early_bed:.0f} 分钟，"
+            f"熬夜档 {self._stayup_tier}）"
+        )
+
+    async def _gen_mutter(self, prompt_tpl: str) -> str:
+        """嘟囔一句：LLM 临场（带人设）→ 失败/超时回落语料池"""
+        try:
+            try:
+                provider = await self.context.get_using_provider_async(None)
+            except Exception:
+                provider = self.context.get_using_provider()
+            if provider is not None:
+                persona_text = ""
+                try:
+                    persona = await self.context.persona_manager.get_default_persona_v3(None)
+                    if isinstance(persona, dict):
+                        persona_text = str(persona.get("prompt") or persona.get("system_prompt") or "")
+                    elif persona is not None:
+                        persona_text = str(getattr(persona, "prompt", "")
+                                           or getattr(persona, "system_prompt", ""))
+                except Exception:
+                    persona_text = ""
+                prompt = (persona_text[:1200] + "\n\n" if persona_text else "") + prompt_tpl
+                resp = await asyncio.wait_for(
+                    provider.text_chat(prompt=prompt, session_id=f"{PLUGIN_NAME}_mutter"),
+                    timeout=20,
+                )
+                text = str(getattr(resp, "completion_text", "") or "").strip()
+                if text:
+                    return text[:120]
+        except Exception:
+            pass
+        return random.choice(self.grace_bye_pool)
 
     async def _enter_sleep(self, bed_ts, wake_ts, note="", nap=False):
         self.phase = PHASE_SLEEPING
@@ -1092,17 +1373,26 @@ class DafeiyuSleepPlugin(Star):
             self._last_night["wake_actual_ts"] = actual_ts
         self._debt_minutes = 0.0  # 债随夜结算清零
         self._roll_tonight(datetime.fromtimestamp(actual_ts) if actual_ts else datetime.now())
+        # v0.8.0 昨晚熬夜→今晚早睡（×0.5 已钳 90 分钟；只在随机模式下挪抽签结果）
+        if self._next_early_bed > 0 and self._night:
+            self._night["bed_ts"] = float(self._night["bed_ts"]) - self._next_early_bed * 60
+            logger.info(f"[睡觉] 昨晚熬夜 {self._stayup_h:.1f}h → 今晚入睡提前 "
+                        f"{self._next_early_bed:.0f} 分钟（{_fmt_hm(self._night['bed_ts'])}）")
+            self._save_state()
+        self._next_early_bed = 0.0
         self._decide_nap(actual_ts or time.time())
 
     def _decide_nap(self, wake_ts):
         """第5步午睡补偿：熬夜（失眠或入睡晚于阈值）次日 13:00~15:00 概率午睡；
-        白天注入"没睡醒"状态行——抽中午睡则蔫到午睡结束，没抽中蔫到 17:00"""
+        白天注入"没睡醒"状态行——抽中午睡则蔫到午睡结束，没抽中蔫到 17:00。
+        v0.8.0：陪聊熬夜档≥1 也走这条线（代价开关管的就是这层）；亏空每 2h 午睡概率 +10%"""
         self._nap_plan = None
         self._drowsy_until = 0.0
         ln = self._last_night
         if not self.c_nap_on or not ln:
             return
-        if not (ln.get("insomnia") or ln.get("late_bed")):
+        stayup_gate = self.c_stayup_cost and self._stayup_tier > 0
+        if not stayup_gate and not (ln.get("insomnia") or ln.get("late_bed")):
             return
         # v0.7.0 补充豁免：休息日睡到饱（按那晚的 rest 判定）不补觉；实际睡眠够长也不补觉
         if self.c_nap_skip_rest and ln.get("rest"):
@@ -1113,7 +1403,9 @@ class DafeiyuSleepPlugin(Star):
         lo = datetime.combine(day, self.c_nap_lo).timestamp()
         hi = datetime.combine(day, self.c_nap_hi).timestamp()
         drowsy_end = datetime.combine(day, dtime(17, 0)).timestamp()
-        if random.random() * 100 < self.c_nap_chance:
+        # v0.8.0 亏空加成：每 2h 亏空 +10%（钳 +40%）
+        bonus = min(40.0, self._ledger_deficit() // 120 * 10) if stayup_gate else 0.0
+        if random.random() * 100 < self.c_nap_chance + bonus:
             at = random.uniform(max(lo, wake_ts), hi)
             dur = random.uniform(self.c_nap_dur_min, self.c_nap_dur_max) * 60
             self._nap_plan = {"at_ts": at, "end_ts": at + dur}
@@ -1130,6 +1422,14 @@ class DafeiyuSleepPlugin(Star):
         self.phase = PHASE_AWAKE
         self._wake_at = now
         self._drowsy_until = 0.0  # 睡过了，困意解除
+        # v0.8.0 午睡缓解：抵掉账本亏空的 40%（单次钳 240；账本记账与代价开关无关）
+        deficit = max(0.0, self._ledger_deficit())
+        if deficit > 0:
+            relief = min(NAP_RELIEVE_CAP, deficit * NAP_RELIEVE_RATIO)
+            self._stayup_ledger.append({"date": datetime.now().date().isoformat(),
+                                        "stayup_min": -round(relief, 1)})
+            self._prune_ledger()
+            logger.info(f"[睡觉] 午睡缓解熬夜账本：抵扣 {relief:.0f} 分钟，剩 {self._ledger_deficit():.0f}")
         self._is_nap = False
         self._sleep_window = None
         self._save_state()
@@ -1205,6 +1505,13 @@ class DafeiyuSleepPlugin(Star):
                     tw = self._temp_wake or {}
                     tw["last_activity"] = time.time()  # 全渠道合并冷场计时重置
                     self._temp_wake = tw
+                # v0.8.0 陪聊熬夜：私聊来言=在聊（宽限冷场重置 + "到点正在聊"判定源）
+                if ":FriendMessage:" in umo:
+                    now_ts = time.time()
+                    self._last_dm_act[umo] = now_ts
+                    if self._grace is not None:
+                        self._grace["last_act"] = now_ts
+                        self._grace["last_umo"] = umo
                 return
             # 睡眠期：先查叫醒频道（白天@必回的夜间版），命中→转醒并放行本条
             wake_kind = self._check_wake(event, umo, text)
@@ -1535,11 +1842,31 @@ class DafeiyuSleepPlugin(Star):
             logger.warning("[睡觉] 梦话发送失败（不影响缓冲）", exc_info=True)
 
     def _flush_morning_into(self, event: AstrMessageEvent, umo: str):
-        """晨间冲刷：夜间消息本体拼进消息链（入历史→反思引擎可读），事实行走 extra 注入"""
+        """晨间冲刷：夜间消息本体拼进消息链（入历史→反思引擎可读），事实行走 extra 注入。
+        v0.8.0 E：主动私聊已代答留言（标记文件在）→ 跳过冲刷表演（留言已被她的
+        "刚醒看到留言"回应带出），缓冲弹出+记冲刷标记，不再注入防双演"""
         buf = self._buffers.pop(umo, [])
         info = self._morning_pending.pop(umo, None)
         if not buf:
             return
+        try:
+            mk = (self._data_dir / "dm_morning_reply.json") if self._data_dir else None
+            if mk is not None and mk.exists():
+                mdata = json.loads(mk.read_text(encoding="utf-8"))
+                if (mdata.get("date") == datetime.now().date().isoformat()
+                        and umo in (mdata.get("umos") or [])):
+                    today = datetime.now().date().isoformat()
+                    mf = self._morning_flushed
+                    if not isinstance(mf, dict) or mf.get("date") != today:
+                        mf = {"date": today, "umos": []}
+                        self._morning_flushed = mf
+                    if umo not in mf["umos"]:
+                        mf["umos"].append(umo)
+                    self._save_state()
+                    logger.info(f"[睡觉] 晨间冲刷跳过（主动私聊已代答留言）：{umo} {len(buf)} 条")
+                    return
+        except Exception:
+            logger.warning("[睡觉] dm代答标记读取失败，按常规冲刷", exc_info=True)
         lines = [
             _render(
                 self.tpl_body_header,
@@ -1611,6 +1938,20 @@ class DafeiyuSleepPlugin(Star):
             # 熬夜次日的"没睡醒"状态行（清醒期、未到截止；午睡结束即解除）
             if self.phase == PHASE_AWAKE and time.time() < self._drowsy_until:
                 parts.append(self.tpl_drowsy)
+            # v0.8.0 陪聊宽限中的困意爬坡（每轮带当前档，画面体状态行）
+            if self._grace is not None:
+                lv = self._grace_level(time.time())
+                parts.append((self.tpl_drowsy_1, self.tpl_drowsy_2, self.tpl_drowsy_3)[lv - 1])
+            # v0.8.0 熬夜次日分级事实行（代价开关管的就是这层；45m轻/1h很困/4h通宵）
+            if (self.c_stayup_cost and self._stayup_tier > 0 and self.phase == PHASE_AWAKE
+                    and time.time() < self._drowsy_until):
+                is_rest = "，而且还是休息日" if (self._last_night or {}).get("rest") else ""
+                if self._stayup_tier == 1:
+                    parts.append(_render(self.tpl_stayup_light, x=int(self._stayup_h * 60)))
+                elif self._stayup_tier == 2:
+                    parts.append(_render(self.tpl_stayup_heavy, x=f"{self._stayup_h:.1f}"))
+                else:
+                    parts.append(_render(self.tpl_stayup_allnight, x=f"{self._stayup_h:.0f}", is_rest=is_rest))
             if (
                 self._wake_at
                 and self.day_fact_hours > 0
@@ -1719,7 +2060,25 @@ class DafeiyuSleepPlugin(Star):
                 )
             elif time.time() < self._drowsy_until:
                 nap = "没睡醒状态生效中（蔫到 17:00 或午睡结束）\n"
-            yield event.plain_result(f"状态：清醒\n{sched}\n{nap}{self._wake_line()}")
+            gr = ""
+            if self._grace:
+                g = self._grace
+                idle = (time.time() - float(g.get("last_act") or time.time())) / 60
+                gr = (f"陪聊宽限中：冷场 {idle:.0f}/{g.get('cold_gap', 0):.0f} 分钟溜走，"
+                      f"硬顶 {_fmt_hm(float(g.get('hard_cap') or 0))}，困意档 {self._grace_level(time.time())}/3\n")
+            led = self._ledger_line()
+            yield event.plain_result(f"状态：清醒\n{sched}\n{nap}{gr}{led}{self._wake_line()}")
+
+    def _ledger_line(self) -> str:
+        """v0.8.0 熬夜账本披露行（/睡觉状态 用）"""
+        d = self._ledger_deficit()
+        if not self._stayup_ledger:
+            return ""
+        allow = self._grace_allowance_min()
+        tier_txt = {0: "", 1: "（今天有点困）", 2: "（今天很困）", 3: "（通宵后遗症）"}.get(
+            self._stayup_tier, "")
+        return (f"熬夜账本（7天滚动）：亏空 {d:.0f} 分钟，今晚陪聊上限 "
+                f"{allow:.0f} 分钟{tier_txt}\n")
 
     @filter.command("作息分布")
     async def cmd_dist(self, event: AstrMessageEvent, args=None):
