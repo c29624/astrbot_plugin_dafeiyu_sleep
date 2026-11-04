@@ -90,7 +90,7 @@ except ImportError:
     At, Json, Plain = None, None, None
 
 PLUGIN_NAME = "astrbot_plugin_dafeiyu_sleep"
-PLUGIN_VERSION = "0.8.3"
+PLUGIN_VERSION = "0.8.4"
 STATE_FILE = "sleep_state.json"
 
 PHASE_AWAKE = "awake"
@@ -142,7 +142,8 @@ DEFAULTS = {
     "night_fact_template": (
         "[系统信息] 今晚你计划 {bed_time} 左右才睡——现在离入睡还早，"
         "别说\"这就去睡/我也要睡了\"；这个时刻自己知道就行，别把具体几点告诉对方，"
-        "被问或要回应告别就说今晚睡得晚、让对方先睡。"
+        "被问或要回应告别就说今晚睡得晚、让对方先睡；"
+        "这句告别话一晚说一次就够，之后再遇到告别，短短一句收住就行，别重复叮嘱。"
     ),
     "fixed_bedtime": "23:00",
     "fixed_waketime": "07:00",
