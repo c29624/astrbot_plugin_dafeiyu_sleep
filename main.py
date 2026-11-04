@@ -90,7 +90,7 @@ except ImportError:
     At, Json, Plain = None, None, None
 
 PLUGIN_NAME = "astrbot_plugin_dafeiyu_sleep"
-PLUGIN_VERSION = "0.8.2"
+PLUGIN_VERSION = "0.8.3"
 STATE_FILE = "sleep_state.json"
 
 PHASE_AWAKE = "awake"
@@ -109,6 +109,7 @@ NAP_RELIEVE_RATIO = 0.4    # 午睡缓解账本亏空的比例
 NAP_RELIEVE_CAP = 240      # 单次午睡最多抵的分钟数
 EARLY_BED_CAP = 90         # 次日早睡前移上限（分钟）
 SILENT_TIER_MAP = {"轻": 1, "中": 2, "重": 3, "从不": 99}  # v0.8.1 无声溜走从几档起可能（默认中）
+DROWSY_SAY_MAX = 3  # v0.8.3 困类状态行每日最多注入的请求数——状态说一次靠模板措辞、注入最多3次防"每条都喊困"（模型无已说过记忆，mark_as_temp不进历史）
 
 # ---- 默认值常量表（自洽：回落机制的最坏情况=零配置运行）----
 DEFAULTS = {
@@ -182,7 +183,7 @@ DEFAULTS = {
     "nap_window_end": "15:00",
     "nap_duration_min": 15.0,
     "nap_duration_max": 30.0,
-    "drowsy_fact_template": "[系统信息] 你昨晚熬夜了，今天没睡醒。",
+    "drowsy_fact_template": "[系统信息] 你昨晚熬夜了，今天没睡醒。这个状态开场提过一次就够了，之后让它体现在句子短、反应慢、懒得动上，别每条消息都喊困。",
     # ---- v0.8.0 陪聊熬夜（懒人三开关 + 困意三档 + 次日分级事实）----
     "sleep_grace_on": True,
     "sleep_stayup_cost_on": True,
@@ -203,11 +204,12 @@ DEFAULTS = {
         "这时候也扛不住了，会小声承认\"特别特别想睡\"。人已经快撑不住，"
         "随时可能聊着聊着就睡着了。"
     ),
-    "stayup_light_fact": "[系统信息] 你昨晚比平时晚睡了{x}分钟，今天有点困倦——不明显，但状态一般。",
-    "stayup_heavy_fact": "[系统信息] 你昨晚熬了{x}小时才睡，今天很困——比平常困得明显，容易走神、话变短。",
+    "stayup_light_fact": "[系统信息] 你昨晚比平时晚睡了{x}分钟，今天有点困倦——不明显但状态一般，提过一次就不用再说，让它体现在语气上。",
+    "stayup_heavy_fact": "[系统信息] 你昨晚熬了{x}小时才睡，今天很困——比平常困得明显，容易走神、话变短。开场提过一次就收，之后困意全走短句和慢半拍，别重复喊困。",
     "stayup_allnight_fact": (
         "[系统信息] 你昨晚通宵了——整整撑了{x}小时才去睡{is_rest}。"
         "今天是硬撑的状态：反应慢、话少、随时想眯，别演得精神抖擞。"
+        "提过一次就收，硬撑感靠短句和慢半拍体现，别每条都说困。"
     ),
     "grace_sneak_template": (
         "你困得不行了，对方还没回消息，你决定不等了、偷偷溜去睡。"
@@ -258,7 +260,7 @@ DEFAULTS = {
         "[系统信息] 你正在熟睡，被这条消息半梦半醒地牵动，迷迷糊糊回了句——"
         "回复要短、含糊、带着睡意，别清醒，别提系统。"
     ),
-    "temp_wake_fact_template": "[系统信息] 你刚被叫醒没多久，还没完全醒透，说话还带着困意。",
+    "temp_wake_fact_template": "[系统信息] 你刚被叫醒没多久，还没完全醒透，说话还带着困意。困意开场提过一次就收，之后靠有气无力的短句体现，别每条都说困。",
     "farewell_llm_enabled": True,
     "farewell_prompt_template": "你要继续睡了，按你平时的语气跟对方道个别。就一句话，短短的，别提任何系统或指令，别解释原因。",
     "farewell_pool": [
@@ -362,6 +364,7 @@ class DafeiyuSleepPlugin(Star):
         self._stayup_h = 0.0  # 昨晚熬夜小时数（渲染 {x} 用）
         self._last_dm_act = {}  # umo -> 私聊来言最后时刻（"到点正在聊"判定）
         self._silent_slip = {}  # v0.8.1 无声溜走标记 {"date","umos"}（次日晨间补一句的依据）
+        self._drowsy_said = {"date": "", "n": 0}  # v0.8.3 困类状态行当日已注入次数（节流）
 
     # ---------- 配置解析与校验（数值类：回落默认+WARNING；跨字段矛盾：双方回落） ----------
 
@@ -813,6 +816,8 @@ class DafeiyuSleepPlugin(Star):
             self._stayup_tier = int(data.get("stayup_tier", 0) or 0)
             self._stayup_h = float(data.get("stayup_h", 0) or 0)
             self._silent_slip = data.get("silent_slip") or {}
+            _ds = data.get("drowsy_said") or {}
+            self._drowsy_said = _ds if isinstance(_ds, dict) else {"date": "", "n": 0}
         except Exception:
             logger.warning("[睡觉] 状态文件损坏，按全新状态启动（缓冲可能丢失）")
 
@@ -842,6 +847,7 @@ class DafeiyuSleepPlugin(Star):
                 "stayup_tier": self._stayup_tier,
                 "stayup_h": self._stayup_h,
                 "silent_slip": self._silent_slip,
+                "drowsy_said": self._drowsy_said,
                 "drowsy_level": self._drowsy_level_now(),
                 "saved_at": time.time(),
             }
@@ -1204,6 +1210,19 @@ class DafeiyuSleepPlugin(Star):
         if best and now - bt <= 30 * 60:
             return best, bt
         return None, 0.0
+
+    def _drowsy_say_gate(self) -> bool:
+        """v0.8.3 困类状态行节流：当日第 1~DROWSY_SAY_MAX 次请求放行，之后不再注入——
+        状态由对话历史自续（她演过一次，模型看得到），防止每条都喊困"""
+        today = datetime.now().date().isoformat()
+        d = self._drowsy_said
+        if d.get("date") != today:
+            d = {"date": today, "n": 0}
+            self._drowsy_said = d
+        if int(d.get("n") or 0) >= DROWSY_SAY_MAX:
+            return False
+        d["n"] = int(d.get("n") or 0) + 1
+        return True
 
     def _drowsy_level_now(self) -> int:
         """当前困倦档 0~3（state 落盘供主动私聊读取：宽限=爬坡档；次日=熬夜档钳2）"""
@@ -1985,10 +2004,10 @@ class DafeiyuSleepPlugin(Star):
                 # 表演指引（人格无关，随晨间冲刷轮注入，不进历史）
                 parts.append(self.tpl_perf_guide)
             # 临时清醒期间每轮带"还没醒透"状态行（持续困意）
-            if self.phase == PHASE_TEMP_WAKE:
+            if self.phase == PHASE_TEMP_WAKE and self._drowsy_say_gate():
                 parts.append(self.tpl_temp_wake_fact)
             # 熬夜次日的"没睡醒"状态行（清醒期、未到截止；午睡结束即解除）
-            if self.phase == PHASE_AWAKE and time.time() < self._drowsy_until:
+            if self.phase == PHASE_AWAKE and time.time() < self._drowsy_until and self._drowsy_say_gate():
                 parts.append(self.tpl_drowsy)
             # v0.8.0 陪聊宽限中的困意爬坡（每轮带当前档，画面体状态行）
             if self._grace is not None:
@@ -1996,7 +2015,7 @@ class DafeiyuSleepPlugin(Star):
                 parts.append((self.tpl_drowsy_1, self.tpl_drowsy_2, self.tpl_drowsy_3)[lv - 1])
             # v0.8.0 熬夜次日分级事实行（代价开关管的就是这层；45m轻/1h很困/4h通宵）
             if (self.c_stayup_cost and self._stayup_tier > 0 and self.phase == PHASE_AWAKE
-                    and time.time() < self._drowsy_until):
+                    and time.time() < self._drowsy_until and self._drowsy_say_gate()):
                 is_rest = "，而且还是休息日" if (self._last_night or {}).get("rest") else ""
                 if self._stayup_tier == 1:
                     parts.append(_render(self.tpl_stayup_light, x=int(self._stayup_h * 60)))
