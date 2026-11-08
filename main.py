@@ -138,6 +138,11 @@ DEFAULTS = {
     "buffer_max_total": 500,
     "buffer_text_truncate": 500,
     "day_fact_hours": 6.0,
+    "morning_fact_template": (  # 晨间事实行：睁眼一次性注入（v0.8.6 起带"别主动念叨"护栏）
+        "[系统信息-昨晚作息] 你昨晚 {sleep_time} 入睡、{wake_time} 醒来，"
+        "睡眠期间收到 {msg_count} 条消息（附后）。"
+        "这份作息自己知道就行，别主动汇报念叨；被问起或真觉得没睡醒，再自然提一句。"
+    ),
     "night_fact_from": "20:00",  # 夜间事实行起点（off/关闭=不注入）
     "night_fact_template": (
         "[系统信息] 今晚你计划 {bed_time} 左右才睡——现在离入睡还早，"
@@ -538,13 +543,7 @@ class DafeiyuSleepPlugin(Star):
         self.wake_min = tv["fixed_waketime"]
 
         # 提示词模板（文案类：自由优先，不做数值式校验）
-        self.tpl_morning_fact = str(
-            cfg.get(
-                "morning_fact_template",
-                "[系统信息-昨晚作息] 你昨晚 {sleep_time} 入睡、{wake_time} 醒来，"
-                "睡眠期间收到 {msg_count} 条消息（附后）。",
-            )
-        )
+        self.tpl_morning_fact = str(cfg.get("morning_fact_template", DEFAULTS["morning_fact_template"]))
         self.tpl_day_fact = str(
             cfg.get("day_fact_template", "[系统信息] 昨晚作息：{sleep_time} 睡，{wake_time} 醒。")
         )

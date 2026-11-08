@@ -748,9 +748,9 @@
       },
       "morning_fact_template": {
         "description": "晨间事实行（睁眼那一刻，仅一次）",
-        "hint": "变量：{sleep_time} {wake_time} {msg_count}；注入后紧跟夜间攒下的消息冲刷（所以文案说'附后'）；临时注入不进历史",
+        "hint": "变量：{sleep_time} {wake_time} {msg_count}；注入后紧跟夜间攒下的消息冲刷（所以文案说'附后'）；临时注入不进历史。默认带\"别主动念叨\"护栏——作息她只在被问起或真没睡醒时才提，不想要这句从模板里删掉即可",
         "type": "text",
-        "default": "[系统信息-昨晚作息] 你昨晚 {sleep_time} 入睡、{wake_time} 醒来，睡眠期间收到 {msg_count} 条消息（附后）。"
+        "default": "[系统信息-昨晚作息] 你昨晚 {sleep_time} 入睡、{wake_time} 醒来，睡眠期间收到 {msg_count} 条消息（附后）。这份作息自己知道就行，别主动汇报念叨；被问起或真觉得没睡醒，再自然提一句。"
       },
       "day_fact_template": {
         "description": "白天事实行（白天记忆持续期内每轮）",
