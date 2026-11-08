@@ -99,6 +99,7 @@ PHASE_TEMP_WAKE = "temp_wake"
 
 # ---- v0.8.0 陪聊熬夜常量（代码级，不暴露配置——懒人三开关之外全走默认）----
 GRACE_ACT_WIN_MIN = 10     # 到点"正在聊"判定：最近 10 分钟内有私聊来言
+FAREWELL_WORDS = ("晚安", "睡了", "先睡", "去睡", "睡觉啦", "睡觉了", "睡啦")  # 与dm道别词同表：他道过别→冷场安静走
 GRACE_COLD_LO, GRACE_COLD_HI = 5.0, 8.0   # 冷场窗口 U(5,8) 每夜随机
 GRACE_STEP_CHOICES = (30, 45, 60)          # 困意爬坡升档间隔（分钟，每夜随机抽）
 GRACE_HARD_CAP_MIN = 240   # 4 小时硬顶（账本亏空按阶梯收缩）
@@ -147,9 +148,13 @@ DEFAULTS = {
     "night_fact_template": (
         "[系统信息] 今晚你计划 {bed_time} 左右才睡——现在离入睡还早，"
         "别说\"这就去睡/我也要睡了\"；具体几点自己知道就行，别报给对方。"
-        "要回应告别就把TA先送去睡，用你自己的理由顺口拖一句——"
-        "说法每次现编，别每次同一个说法；"
-        "这句告别话一晚说一次就够，之后再遇到告别，短短一句收住就行，别重复叮嘱。"
+        "对方说要去睡或道别时，自然应一句就好——别催TA早点睡、别反复叮嘱，"
+        "TA几点睡是TA自己的事。"
+    ),
+    "night_debt_fact_template": (  # v0.8.7 昨晚欠觉原因行（失眠/晚于01:00/不足6h才注入）
+        "[系统信息-昨晚欠觉] 你昨晚 {last_bed} 才入睡{sleep_dur}——"
+        "今晚要是显得困，多半是这个。被问为什么这么困就照实说；"
+        "要走时也可以拿它当理由，说法每次现编。"
     ),
     "fixed_bedtime": "23:00",
     "fixed_waketime": "07:00",
@@ -371,6 +376,7 @@ class DafeiyuSleepPlugin(Star):
         self._stayup_h = 0.0  # 昨晚熬夜小时数（渲染 {x} 用）
         self._last_dm_act = {}  # umo -> 私聊来言最后时刻（"到点正在聊"判定）
         self._silent_slip = {}  # v0.8.1 无声溜走标记 {"date","umos"}（次日晨间补一句的依据）
+        self._last_farewell = {}  # v0.8.7 per-umo 他最近一次道别词时间（道别后安静走判定）
         self._drowsy_said = {"date": "", "n": 0}  # v0.8.3 困类状态行当日已注入次数（节流）
 
     # ---------- 配置解析与校验（数值类：回落默认+WARNING；跨字段矛盾：双方回落） ----------
@@ -556,6 +562,7 @@ class DafeiyuSleepPlugin(Star):
             if self.night_fact_from is None:
                 self.night_fact_from = 20 * 60  # 非法回落默认（数值类铁律）
         self.tpl_night_fact = str(cfg.get("night_fact_template", DEFAULTS["night_fact_template"]))
+        self.tpl_night_debt = str(cfg.get("night_debt_fact_template", DEFAULTS["night_debt_fact_template"]))
         self.tpl_body_header = str(
             cfg.get("body_header_template", "（以下是睡眠期间收到的 {msg_count} 条消息）")
         )
@@ -817,6 +824,9 @@ class DafeiyuSleepPlugin(Star):
             self._stayup_tier = int(data.get("stayup_tier", 0) or 0)
             self._stayup_h = float(data.get("stayup_h", 0) or 0)
             self._silent_slip = data.get("silent_slip") or {}
+            lf = data.get("last_farewell") or {}
+            self._last_farewell = {k: float(v) for k, v in lf.items()
+                                   if isinstance(v, (int, float))} if isinstance(lf, dict) else {}
             _ds = data.get("drowsy_said") or {}
             self._drowsy_said = _ds if isinstance(_ds, dict) else {"date": "", "n": 0}
         except Exception:
@@ -848,6 +858,8 @@ class DafeiyuSleepPlugin(Star):
                 "stayup_tier": self._stayup_tier,
                 "stayup_h": self._stayup_h,
                 "silent_slip": self._silent_slip,
+                "last_farewell": {k: v for k, v in (self._last_farewell or {}).items()
+                                  if time.time() - float(v) <= 48 * 3600},  # 超48h道别记录过期
                 "drowsy_said": self._drowsy_said,
                 "drowsy_level": self._drowsy_level_now(),
                 "saved_at": time.time(),
@@ -1192,6 +1204,23 @@ class DafeiyuSleepPlugin(Star):
                 return float(cap)
         return 0.0
 
+    def _night_debt_reason(self):
+        """v0.8.7 昨晚欠觉事实：失眠 / 实际入睡晚于01:00 / 睡眠不足6h 才有原因可提
+        → (last_bed_str, sleep_dur_str) 或 None（dur≥7.5h 时 dur 串为空——睡够了就别念时长）"""
+        ln = self._last_night or {}
+        bed = float(ln.get("bed_ts") or 0)
+        wake = float(ln.get("wake_ts") or 0)
+        if not bed or wake <= bed:
+            return None
+        lt = datetime.fromtimestamp(bed)
+        wall = lt.hour * 60 + lt.minute
+        late = bool(ln.get("insomnia")) or (60 <= wall < 360)  # 01:00~06:00 间才睡=晚
+        dur_h = (wake - bed) / 3600.0
+        if not (late or dur_h < 6.0):
+            return None
+        dur = f"、只睡了 {dur_h:.1f} 小时" if dur_h < 7.5 else ""
+        return _fmt_hm(bed), dur
+
     @staticmethod
     def _stayup_tier_of(stayup_min: float) -> int:
         if stayup_min >= STAYUP_TIER_MIN[2]:
@@ -1304,12 +1333,22 @@ class DafeiyuSleepPlugin(Star):
             return
         cold = float(g.get("cold_gap") or 6.0) * 60
         if now - float(g.get("last_act") or now) >= cold:
+            umo = g.get("last_umo")
+            fw = float((getattr(self, "_last_farewell", None) or {}).get(umo) or 0)
+            if umo and fw and now - fw <= 30 * 60:
+                # v0.8.7 道别后安静走：30分钟内他道过别（晚安/睡了类）——收尾已在对话里
+                # 完成，不掷嘟囔不记断片，安静睡（道完晚安再冒一句才是"又一句晚安"）
+                await self._grace_sleep(now, "道别后安静走")
+                return
             # v0.8.1 档位门控：困到设定档位（默认中）才可能无声——轻档必打招呼；
             # 达标后按嘟囔比例掷，无声时记标记（次日晨间补一句"聊着聊着睡着"）
+            # v0.8.7 欠觉夜无声关闸：昨晚失眠/晚于01:00/不足6h→必留一句（真人逻辑：
+            # 昨晚就炸了的人会说"顶不住了睡了"再走；无声只留给没有明确原因的普通困）
             lv = self._grace_level(now)
             silent_ok = lv >= SILENT_TIER_MAP.get(self.c_silent_tier, 2)
             mutter = None
-            if (not silent_ok) or random.random() * 100 < self.c_sneak_ratio:
+            if (not silent_ok) or self._night_debt_reason() is not None \
+                    or random.random() * 100 < self.c_sneak_ratio:
                 mutter = await self._gen_mutter(self.tpl_sneak)
             await self._grace_sleep(now, "冷场溜走", mutter=mutter)
 
@@ -1363,6 +1402,12 @@ class DafeiyuSleepPlugin(Star):
 
     async def _gen_mutter(self, prompt_tpl: str) -> str:
         """嘟囔一句：LLM 临场（带人设）→ 失败/超时回落语料池"""
+        debt = self._night_debt_reason()
+        if debt:
+            # v0.8.7 欠觉原因顺嘴化：给原因不给台词，说法现编
+            prompt_tpl = prompt_tpl + (
+                f"（你昨晚 {debt[0]} 才睡{debt[1]}，今晚的困有这个原因——想提就顺嘴带上，说法现编。）"
+            )
         try:
             try:
                 provider = await self.context.get_using_provider_async(None)
@@ -1558,6 +1603,8 @@ class DafeiyuSleepPlugin(Star):
                 if ":FriendMessage:" in umo:
                     now_ts = time.time()
                     self._last_dm_act[umo] = now_ts
+                    if any(w in text for w in FAREWELL_WORDS):
+                        self._last_farewell[umo] = now_ts  # v0.8.7 道别在册：冷场走=安静走
                     if self._grace is not None:
                         self._grace["last_act"] = now_ts
                         self._grace["last_umo"] = umo
@@ -1902,6 +1949,17 @@ class DafeiyuSleepPlugin(Star):
         if slip_day not in (today, yesterday):
             self._silent_slip = {}
             return ""
+        # v0.8.7 护栏：道别过的"无声"不是断片——她睡前不久他道过别，收尾已在对话里
+        # 完成，这句"没来得及道别就断片"就是假剧情，吞掉（顺带兜住旧版留下的标记）
+        ln = self._last_night or {}
+        bed = float(ln.get("bed_ts") or 0)
+        fw = float((getattr(self, "_last_farewell", None) or {}).get(umo) or 0)
+        if bed and fw and -30 * 60 <= bed - fw <= 4.5 * 3600:
+            if consume:
+                umos = [u for u in ss["umos"] if u != umo]
+                self._silent_slip = {"date": ss.get("date"), "umos": umos} if umos else {}
+                self._save_state()
+            return ""
         if consume:
             umos = [u for u in ss["umos"] if u != umo]
             self._silent_slip = {"date": ss.get("date"), "umos": umos} if umos else {}
@@ -2014,6 +2072,9 @@ class DafeiyuSleepPlugin(Star):
             if self._grace is not None:
                 lv = self._grace_level(time.time())
                 parts.append((self.tpl_drowsy_1, self.tpl_drowsy_2, self.tpl_drowsy_3)[lv - 1])
+                debt = self._night_debt_reason()
+                if debt:  # v0.8.7 欠觉原因行：困有出处，被问答得上
+                    parts.append(_render(self.tpl_night_debt, last_bed=debt[0], sleep_dur=debt[1]))
             # v0.8.0 熬夜次日分级事实行（代价开关管的就是这层；45m轻/1h很困/4h通宵）
             if (self.c_stayup_cost and self._stayup_tier > 0 and self.phase == PHASE_AWAKE
                     and time.time() < self._drowsy_until and self._drowsy_say_gate()):
@@ -2053,6 +2114,9 @@ class DafeiyuSleepPlugin(Star):
                     nm = ndt.hour * 60 + ndt.minute
                     if nm >= self.night_fact_from or nm < 8 * 60:  # 起点后到入睡；跨0点续到早8点前
                         parts.append(_render(self.tpl_night_fact, bed_time=_fmt_hm(nbed)))
+                        debt = self._night_debt_reason()
+                        if debt:  # v0.8.7 欠觉原因行随夜间事实行（20:00起她就知道今晚为什么困）
+                            parts.append(_render(self.tpl_night_debt, last_bed=debt[0], sleep_dur=debt[1]))
             for p in parts:
                 req.extra_user_content_parts.append(TextPart(text=p).mark_as_temp())
         except Exception:
